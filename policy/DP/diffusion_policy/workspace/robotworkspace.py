@@ -67,7 +67,7 @@ class RobotWorkspace(BaseWorkspace):
                 resume_path = cfg.finetune.get("resume_from")
         
             if resume_path:
-                import torch
+                # import torch
                 try:
                     ckpt = torch.load(resume_path, map_location="cpu")
                     # 支持多种 ckpt 格式
@@ -89,13 +89,39 @@ class RobotWorkspace(BaseWorkspace):
                 except Exception as e:
                     print(f"Failed to resume checkpoint {resume_path}: {e}")
 
-        # resume training
-        if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
-        
+        # resume training: support explicit training.resume_from (file or dir)
+        resume_path = None
+        if getattr(cfg.training, "resume_from", None):
+            resume_path = pathlib.Path(cfg.training.resume_from)
+        elif getattr(cfg.training, "resume", False):
+            latest_ckpt_path = self.get_checkpoint_path()
+            if latest_ckpt_path.is_file():
+                resume_path = latest_ckpt_path
+
+        # if a directory is provided, choose newest .ckpt/.pth/.pt inside
+        if resume_path is not None and resume_path.exists() and resume_path.is_dir():
+            candidates = sorted([p for p in resume_path.glob("*") if p.suffix in [".ckpt", ".pth", ".pt"]],
+                                key=lambda p: p.stat().st_mtime)
+            resume_path = candidates[-1] if candidates else None
+
+        if resume_path is not None:
+            if not resume_path.exists() or not resume_path.is_file():
+                print(f"resume path does not exist or is not a file: {resume_path}")
+            else:
+                print(f"Resuming from checkpoint {resume_path}")
+                try:
+                    # use workspace's load_checkpoint to restore model + optimizer + epoch/global_step if supported
+                    self.load_checkpoint(path=str(resume_path))
+                    # some checkpoints don't store 'epoch' — try to infer from filename if still zero
+                    if getattr(self, "epoch", 0) == 0:
+                        try:
+                            self.epoch = int(pathlib.Path(resume_path).stem)
+                        except Exception:
+                            pass
+                    print(f"Resumed. epoch={self.epoch}, global_step={self.global_step}")
+                except Exception as e:
+                    print(f"Failed to load checkpoint {resume_path}: {e}")
+
         # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)

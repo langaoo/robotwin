@@ -98,6 +98,7 @@ training:
   seed: 42
   debug: False
   resume: True
+  resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/400.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
