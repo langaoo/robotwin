@@ -9,8 +9,11 @@ gpu_id=${6}
 # 可选: 第7个参数指定 batch_size；不填则默认 128（与配置文件中的原始设定一致）
 # 注意: 原先写成 ${7:64} 是子串截取写法，会导致 batch_size 为空，这里修正为 ${7:-128}
 batch_size=${7:-128}
-isfinetune=${8:-False}  # 是否微调
-epoch_num=${9:-600}  # 训练轮数
+epoch_num=${8:-600}  # 训练轮数
+isfinetune=${9:-False}  # 是否微调
+basemodel=${10:-}  # 微调模型路径
+resume_from=${11:-}  # 继续训练的模型路径
+
 
 head_camera_type=D435
 
@@ -59,6 +62,8 @@ python train.py --config-name=${config_name}.yaml \
                             dataloader.batch_size=${batch_size} \
                             val_dataloader.batch_size=${batch_size} \
                             finetune.isfinetune=${isfinetune} \
-                            training.num_epochs=${epoch_num}
+                            training.num_epochs=${epoch_num} \
+                            finetune.resume_from=${resume_from} \
+                            finetune.base_model=${basemodel} \
                             # checkpoint.save_ckpt=${save_ckpt}
                             # hydra.run.dir=${run_dir} \

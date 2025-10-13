@@ -8,7 +8,7 @@ ckpt_setting=${3}
 expert_data_num=${4}
 seed=${5}
 gpu_id=${6}
-checkpoint_num=${7:-600}  # 默认 50
+checkpoint_num=${7:-600}  # 默认 600
 DEBUG=False
 
 export CUDA_VISIBLE_DEVICES=${gpu_id}

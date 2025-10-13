@@ -37,8 +37,8 @@ class DP:
         cls = hydra.utils.get_class(cfg._target_)
         workspace = cls(cfg, output_dir=output_dir)
         workspace: RobotWorkspace
-        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-
+        # workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+        workspace.load_payload(payload, exclude_keys=['optimizer'], include_keys=None)
         # get policy from workspace
         policy = workspace.model
         if cfg.training.use_ema:

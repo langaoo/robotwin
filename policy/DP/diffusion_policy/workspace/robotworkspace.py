@@ -60,67 +60,12 @@ class RobotWorkspace(BaseWorkspace):
         seed = cfg.training.seed
         head_camera_type = cfg.head_camera_type
 
-        # --- load resume checkpoint if configured ---
-        resume_path = None
-        if cfg.finetune.get("isfinetune", True):
-            if getattr(cfg, "finetune", None) and cfg.finetune.get("resume_from"):
-                resume_path = cfg.finetune.get("resume_from")
-        
-            if resume_path:
-                # import torch
-                try:
-                    ckpt = torch.load(resume_path, map_location="cpu")
-                    # 支持多种 ckpt 格式
-                    if isinstance(ckpt, dict) and ("model" in ckpt or "state_dict" in ckpt):
-                        state = ckpt.get("model", ckpt.get("state_dict", ckpt))
-                    else:
-                        state = ckpt
-                    self.model.load_state_dict(state)
-                    if "optimizer" in ckpt and self.optimizer is not None:
-                        try:
-                            self.optimizer.load_state_dict(ckpt["optimizer"])
-                        except Exception:
-                            pass
-                    self.global_step = ckpt.get("global_step", getattr(self, "global_step", 0))
-                    print(f"Resumed from checkpoint: {resume_path}")
-                    # 加载完 self.model 后添加
-                    if self.ema_model is not None:
-                        self.ema_model.load_state_dict(state)
-                except Exception as e:
-                    print(f"Failed to resume checkpoint {resume_path}: {e}")
-
-        # resume training: support explicit training.resume_from (file or dir)
-        resume_path = None
-        if getattr(cfg.training, "resume_from", None):
-            resume_path = pathlib.Path(cfg.training.resume_from)
-        elif getattr(cfg.training, "resume", False):
-            latest_ckpt_path = self.get_checkpoint_path()
-            if latest_ckpt_path.is_file():
-                resume_path = latest_ckpt_path
-
-        # if a directory is provided, choose newest .ckpt/.pth/.pt inside
-        if resume_path is not None and resume_path.exists() and resume_path.is_dir():
-            candidates = sorted([p for p in resume_path.glob("*") if p.suffix in [".ckpt", ".pth", ".pt"]],
-                                key=lambda p: p.stat().st_mtime)
-            resume_path = candidates[-1] if candidates else None
-
-        if resume_path is not None:
-            if not resume_path.exists() or not resume_path.is_file():
-                print(f"resume path does not exist or is not a file: {resume_path}")
-            else:
-                print(f"Resuming from checkpoint {resume_path}")
-                try:
-                    # use workspace's load_checkpoint to restore model + optimizer + epoch/global_step if supported
-                    self.load_checkpoint(path=str(resume_path))
-                    # some checkpoints don't store 'epoch' — try to infer from filename if still zero
-                    if getattr(self, "epoch", 0) == 0:
-                        try:
-                            self.epoch = int(pathlib.Path(resume_path).stem)
-                        except Exception:
-                            pass
-                    print(f"Resumed. epoch={self.epoch}, global_step={self.global_step}")
-                except Exception as e:
-                    print(f"Failed to load checkpoint {resume_path}: {e}")
+        # resume training
+        if cfg.training.resume:
+            lastest_ckpt_path = self.get_checkpoint_path()
+            if lastest_ckpt_path.is_file():
+                print(f"Resuming from checkpoint {lastest_ckpt_path}")
+                self.load_checkpoint(path=lastest_ckpt_path)
 
         # configure dataset
         dataset: BaseImageDataset

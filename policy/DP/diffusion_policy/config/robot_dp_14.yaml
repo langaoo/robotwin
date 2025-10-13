@@ -86,9 +86,18 @@ val_dataloader:
   pin_memory: True
   persistent_workers: False
 
+finetune:
+  isfinetune: false
+  # resume_from: /home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/600.ckpt
+  resume_from: null # 微调模型路径
+  base_model: null  
+  freeze_encoder: True  # 微调时是否冻结编码器
+  reset_optimizer: True  # 微调时是否重置优化器
+
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 1.0e-4
+  # lr: 1.0e-4
+  lr: ${eval:1e-5 if ${finetune.isfinetune} else 1e-4}
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-6
@@ -97,8 +106,8 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False
-  resume: True
-  resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/400.ckpt"
+  resume: False
+  # resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/400.ckpt"
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -120,9 +129,6 @@ training:
   # misc
   tqdm_interval_sec: 1.0
 
-finetune:
-  isfinetune: false
-  resume_from: /home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_randomized-50-0/600.ckpt
 
 logging:
   project: diffusion_policy_debug
