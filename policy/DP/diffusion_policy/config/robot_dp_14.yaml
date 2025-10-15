@@ -90,7 +90,7 @@ finetune:
   isfinetune: false
   # resume_from: /home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/600.ckpt
   resume_from: null # 微调模型路径
-  base_model: null  
+  base_model: null  # 微调模型的基础模型配置ckpt使用的配置文件的名称
   freeze_encoder: True  # 微调时是否冻结编码器
   reset_optimizer: True  # 微调时是否重置优化器
 

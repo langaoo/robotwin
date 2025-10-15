@@ -50,7 +50,7 @@ fi
 
 python train.py --config-name=${config_name}.yaml \
                             task.name=${task_name} \
-                            task.dataset.zarr_path="data/${task_name}-${task_config}-${expert_data_num}.zarr" \
+                            task.dataset.zarr_path="data/${task_name}-${task_config}-${expert_data_num}_multi_cam.zarr" \
                             training.debug=$DEBUG \
                             training.seed=${seed} \
                             training.device="cuda:0" \
