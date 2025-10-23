@@ -60,12 +60,94 @@ class RobotWorkspace(BaseWorkspace):
         seed = cfg.training.seed
         head_camera_type = cfg.head_camera_type
 
-        # resume training
-        if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+        # --------------------------
+        # 1. 微调模式（优先级高于断点续训）
+        # --------------------------
+        if cfg.finetune.isfinetune and cfg.finetune.resume_from:
+            pretrained_path = pathlib.Path(cfg.finetune.resume_from)
+            print()
+            if not pretrained_path.exists():
+                raise FileNotFoundError(f"预训练模型不存在: {pretrained_path}")
+            
+            try:
+                # 加载预训练模型权重（仅加载模型，不加载优化器/训练状态）
+                ckpt = torch.load(pretrained_path, map_location="cpu")
+                # 尝试从检查点中提取模型参数
+                # 从检查点中提取模型参数（处理两种常见的检查点格式）
+                if "state_dicts" in ckpt:
+                    # 处理工作区格式的检查点（包含多个组件的状态）
+                    state = ckpt["state_dicts"].get("model", ckpt["state_dicts"])
+                elif "model" in ckpt:
+                    state = ckpt["model"]
+                else:
+                    state = ckpt  # 假设整个文件都是模型参数
+                self.model.load_state_dict(state)
+      
+                print(f"微调模式：加载预训练模型 {pretrained_path}")
+                print(f"微调模式：基础模型{cfg.finetune.base_model}")
+
+                # 加载 EMA 模型（如果使用）
+                if self.ema_model is not None:
+                    self.ema_model.load_state_dict(state)
+
+                # 微调时冻结指定层（如编码器）
+                if cfg.finetune.freeze_encoder:
+                    self.model.obs_encoder.eval()
+                    self.model.obs_encoder.requires_grad_(False)
+                    print("微调模式：冻结编码器权重")
+
+                # 微调时重置优化器（避免沿用预训练的优化器状态）
+                if cfg.finetune.reset_optimizer:
+                    self.optimizer = hydra.utils.instantiate(cfg.optimizer, params=self.model.parameters())
+                    print("微调模式：重置优化器")
+
+                # 微调时重置训练状态（epoch/global_step 从零开始）
+                self.epoch = 0
+                self.global_step = 0
+                print("微调模式：重置训练状态（epoch/global_step = 0）")
+
+            except Exception as e:
+                print(f"微调模型加载失败: {e}")
+                raise
+
+        # --------------------------
+        # 2. 断点续训模式（仅当未启用微调时生效）
+        # --------------------------
+        else:
+            resume_path = None
+            # 优先使用显式指定的续训路径
+            if getattr(cfg.training, "resume_from", None):
+                resume_path = pathlib.Path(cfg.training.resume_from)
+            # 否则使用默认的最新 checkpoint
+            elif cfg.training.resume:
+                latest_ckpt_path = self.get_checkpoint_path()
+                if latest_ckpt_path.is_file():
+                    resume_path = latest_ckpt_path
+
+            # 处理目录路径（自动找最新 ckpt）
+            if resume_path and resume_path.is_dir():
+                candidates = sorted(
+                    [p for p in resume_path.glob("*") if p.suffix in [".ckpt", ".pth", ".pt"]],
+                    key=lambda p: p.stat().st_mtime
+                )
+                resume_path = candidates[-1] if candidates else None
+
+            if resume_path and resume_path.is_file():
+                print(f"断点续训：从 {resume_path} 加载")
+                try:
+                    # 加载完整训练状态（模型、优化器、epoch/global_step）
+                    self.load_checkpoint(path=str(resume_path))
+                    # 从文件名推断 epoch（如果 checkpoint 中未存储）
+                    if self.epoch == 0:
+                        try:
+                            self.epoch = int(resume_path.stem)
+                        except:
+                            pass
+                    print(f"续训状态：epoch={self.epoch}, global_step={self.global_step}")
+                except Exception as e:
+                    print(f"续训加载失败: {e}")
+                    raise
+
 
         # configure dataset
         dataset: BaseImageDataset
@@ -146,7 +228,7 @@ class RobotWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, "logs.json.txt")
 
         with JsonLogger(log_path) as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            while self.epoch < cfg.training.num_epochs:
                 step_log = dict()
                 # ========= train for this epoch ==========
                 if cfg.training.freeze_encoder:
@@ -262,7 +344,11 @@ class RobotWorkspace(BaseWorkspace):
                 if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     save_name = pathlib.Path(self.cfg.task.dataset.zarr_path).stem
-                    self.save_checkpoint(f"checkpoints/{save_name}-{seed}/{self.epoch + 1}.ckpt")  # TODO
+                    if cfg.finetune.isfinetune:
+                        self.save_checkpoint(f"checkpoints/{save_name}-{cfg.finetune.base_model}-{seed}/{self.epoch + 1}.ckpt")  # TODO
+
+                    else:
+                        self.save_checkpoint(f"checkpoints/{save_name}-{seed}/{self.epoch + 1}.ckpt")  # TODO
 
                 # ========= eval end for this epoch ==========
                 policy.train()

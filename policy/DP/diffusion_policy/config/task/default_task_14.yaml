@@ -41,6 +41,7 @@ env_runner:
 dataset:
   _target_: diffusion_policy.dataset.robot_image_dataset.RobotImageDataset
   zarr_path: data/useless.zarr
+  task_config_path: task_config/demo.yml
   batch_size: ${dataloader.batch_size}
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}

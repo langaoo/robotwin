@@ -50,6 +50,7 @@ fi
 
 python train.py --config-name=${config_name}.yaml \
                             task.name=${task_name} \
+                            task.dataset.task_config_path="../../task_config/${task_config}.yml" \
                             task.dataset.zarr_path="data/${task_name}-${task_config}-${expert_data_num}_multi_cam.zarr" \
                             training.debug=$DEBUG \
                             training.seed=${seed} \
