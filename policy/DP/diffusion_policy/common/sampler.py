@@ -104,6 +104,10 @@ class SequenceSampler:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
 
         if np.any(episode_mask):
+            print("-----------------")
+
+            print(sequence_length)
+            print("--------------")
             indices = create_indices(
                 episode_ends,
                 sequence_length=sequence_length,

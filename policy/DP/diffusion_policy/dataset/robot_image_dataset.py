@@ -21,6 +21,8 @@ from omegaconf import OmegaConf
 import os
 import random
 import yaml
+from torchvision.transforms import functional as TF
+from matplotlib import pyplot as plt
 
 
 
@@ -79,6 +81,13 @@ class RobotImageDataset(BaseImageDataset):
         self.sensor_noise_aug = self._build_sensor_noise_aug()
         self.camera_jitter_aug = self._build_camera_jitter_aug()
         self.occlusion_aug = self._build_occlusion_aug()
+        # 记录各相机的原始 (H, W)，用于增强后还原
+        self.cam_hw = {
+            'head_cam': tuple(self.replay_buffer['head_camera'].shape[-2:]),  # (H, W)
+            'front_cam': tuple(self.replay_buffer['front_camera'].shape[-2:]),
+            'left_cam': tuple(self.replay_buffer['left_camera'].shape[-2:]),
+            'right_cam': tuple(self.replay_buffer['right_camera'].shape[-2:]),
+        }
 
     def _load_augmentation_config(self, config_path):
         """从task_config加载增强参数"""
@@ -143,6 +152,46 @@ class RobotImageDataset(BaseImageDataset):
         # 合并配置（优先使用文件中的配置）
         aug_config = config.get('data_augmentation', {})
         return {** default_aug, **aug_config}
+
+    def _save_augmentation_vis(self, original_data, augmented_data, idx, is_batch=False):
+        """保存增强前后的图像对比"""
+        save_dir = os.path.join("augmentation_vis", "batch" if is_batch else "single")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        t = 0
+        for cam_name in ['head_cam', 'front_cam', 'left_cam', 'right_cam']:
+            # 原始图像
+            original_img = original_data["obs"][cam_name][t]
+            original_img = np.transpose(original_img, (1, 2, 0)).astype(np.float32) / 255.0
+            
+            # 增强后图像
+            augmented_img = augmented_data["obs"][cam_name][t]
+            augmented_img = np.transpose(augmented_img, (1, 2, 0))
+            
+            # # ✅ 调试：打印数据范围
+            # print(f"[调试] {cam_name} - 增强后范围: [{augmented_img.min():.3f}, {augmented_img.max():.3f}]")
+            
+            # 确保数据在 [0, 1] 范围
+            if augmented_img.max() > 1.0:
+                augmented_img = augmented_img / 255.0
+            augmented_img = np.clip(augmented_img, 0, 1)  # ✅ 防御性裁剪
+            
+            # 绘制对比图
+            plt.figure(figsize=(10, 5))
+            plt.subplot(121)
+            plt.imshow(original_img)
+            plt.title("Original")
+            plt.axis("off")
+            
+            plt.subplot(122)
+            plt.imshow(augmented_img)
+            plt.title("Augmented")
+            plt.axis("off")
+            
+            save_path = os.path.join(save_dir, f"idx_{idx}_cam_{cam_name}_frame_{t}.png")
+            plt.savefig(save_path)
+            plt.close()
+
 
     def _build_img_transforms(self):
         """构建图像增强变换管道"""
@@ -245,6 +294,7 @@ class RobotImageDataset(BaseImageDataset):
                     )
                 )
         return None
+    
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
@@ -283,71 +333,12 @@ class RobotImageDataset(BaseImageDataset):
     def _sample_to_data(self, sample):
         agent_pos = sample["state"].astype(np.float32)  # (agent_posx2, block_posex3)
         # 原始数据格式：zarr中保存的是(T, C, H, W)格式
-        head_cam = sample["head_camera"]
-        front_cam = sample['front_camera']
-        left_cam = sample['left_camera']
-        right_cam = sample['right_camera']
+        head_cam = sample["head_camera"].astype(np.float32)
+        front_cam = sample['front_camera'].astype(np.float32)
+        left_cam = sample['left_camera'].astype(np.float32)
+        right_cam = sample['right_camera'].astype(np.float32)
 
-        # 检查是否需要应用增强
-        need_aug = any([
-            self.aug_config['use_random_crop'],
-            self.aug_config['use_rotation'],
-            self.aug_config['use_color_jitter'],
-            self.aug_config['use_sensor_noise'],
-            self.aug_config['use_camera_jitter'],
-            self.aug_config['use_perspective'],
-            self.aug_config['use_occlusion'],
-        ])
-
-        if need_aug:
-            T = head_cam.shape[0]  # 时间步长
-            # 为每个相机初始化增强后的列表
-            augmented_cams = {
-                'head': [], 'front': [], 'left': [], 'right': []
-            }
-
-            for t in range(T):
-                # 处理每个相机的单帧图像
-                # 数据是(C, H, W)格式，需要转换为(H, W, C)格式给PIL
-                cams = {
-                    'head': np.transpose(head_cam[t], (1, 2, 0)).astype(np.uint8),
-                    'front': np.transpose(front_cam[t], (1, 2, 0)).astype(np.uint8),
-                    'left': np.transpose(left_cam[t], (1, 2, 0)).astype(np.uint8),
-                    'right': np.transpose(right_cam[t], (1, 2, 0)).astype(np.uint8)
-                }
-
-                # 应用增强（按顺序）
-                for cam_name in cams:
-                    img = cams[cam_name]
-                    
-                    # 1. 传感器噪声
-                    if self.sensor_noise_aug is not None:
-                        img = self.sensor_noise_aug(image=img)
-                    
-                    # 2. 相机视角抖动 + 透视变换
-                    if self.camera_jitter_aug is not None:
-                        img = self.camera_jitter_aug(image=img)
-
-                    # 3. 遮挡模拟
-                    if self.occlusion_aug is not None:
-                        img = self.occlusion_aug(image=img)
-
-                    # 4. 基础变换（裁剪/旋转/颜色抖动）
-                    img_tensor = self.img_transforms(img)
-                    augmented_cams[cam_name].append(img_tensor)
-
-            # 堆叠增强后的图像（T, C, H, W），然后转换为numpy
-            head_cam = torch.stack(augmented_cams['head']).numpy()
-            front_cam = torch.stack(augmented_cams['front']).numpy()
-            left_cam = torch.stack(augmented_cams['left']).numpy()
-            right_cam = torch.stack(augmented_cams['right']).numpy()
-        else:
-            # 不增强时，数据已经是(T, C, H, W)格式，只需归一化
-            head_cam = head_cam.astype(np.float32) / 255.0
-            front_cam = front_cam.astype(np.float32) / 255.0
-            left_cam = left_cam.astype(np.float32) / 255.0
-            right_cam = right_cam.astype(np.float32) / 255.0
-
+     
 
         data = {
             "obs": {
@@ -361,6 +352,79 @@ class RobotImageDataset(BaseImageDataset):
         }
         return data
 
+    def _augment_single_camera(self, cam_data, target_hw):
+        """增强单个相机的时序数据（T, C, H, W），并在增强后强制还原到 target_hw=(H, W)"""
+        T = cam_data.shape[0]
+        augmented_frames = []
+
+        for t in range(T):
+            # 转换为 (H, W, C) 格式（imgaug 要求）
+            frame = np.transpose(cam_data[t], (1, 2, 0)).astype(np.uint8)
+
+            # 1. 传感器噪声
+            if self.sensor_noise_aug is not None:
+                frame = self.sensor_noise_aug(image=frame)
+
+            # 2. 相机视角抖动 + 透视变换
+            if self.camera_jitter_aug is not None:
+                frame = self.camera_jitter_aug(image=frame)
+
+            # 3. 遮挡模拟
+            if self.occlusion_aug is not None:
+                frame = self.occlusion_aug(image=frame)
+
+            # 基础变换到 tensor (C, H', W')，float32，[0,1]
+            frame_tensor = self.img_transforms(frame)
+
+            # ★ 关键：如果增强改变了分辨率，这里强制还原到模型登记的 (H, W)
+            if frame_tensor.shape[1:] != target_hw:
+                frame_tensor = TF.resize(frame_tensor, target_hw, antialias=True)
+            
+
+            augmented_frames.append(frame_tensor)
+
+        return torch.stack(augmented_frames).numpy()
+
+    def _augment_data(self, data):
+            """统一增强逻辑，处理单样本数据"""
+            obs = data["obs"]
+            action = data["action"]
+            need_aug = any([
+                self.aug_config['use_random_crop'],
+                self.aug_config['use_rotation'],
+                self.aug_config['use_color_jitter'],
+                self.aug_config['use_sensor_noise'],
+                self.aug_config['use_camera_jitter'],
+                self.aug_config['use_perspective'],
+                self.aug_config['use_occlusion'],
+            ])
+
+            # 图像增强
+            if need_aug:
+                head_cam = self._augment_single_camera(obs["head_cam"], self.cam_hw['head_cam'])
+                front_cam = self._augment_single_camera(obs["front_cam"], self.cam_hw['front_cam'])
+                left_cam = self._augment_single_camera(obs["left_cam"], self.cam_hw['left_cam'])
+                right_cam = self._augment_single_camera(obs["right_cam"], self.cam_hw['right_cam'])
+            else:
+                # 不增强时仅归一化
+                head_cam = obs["head_cam"] / 255.0
+                front_cam = obs["front_cam"] / 255.0
+                left_cam = obs["left_cam"] / 255.0
+                right_cam = obs["right_cam"] / 255.0
+
+            # 构造增强后的观测数据
+            augmented_obs = {
+                "head_cam": head_cam,
+                "front_cam": front_cam,
+                "left_cam": left_cam,
+                "right_cam": right_cam,
+                "agent_pos": obs["agent_pos"].copy()
+            }
+
+            return {
+            "obs": augmented_obs,
+            "action": action
+        }
     def __getitem__(self, idx) -> Dict[str, torch.Tensor]:
         if isinstance(idx, slice):
             raise NotImplementedError  # Specialized
@@ -368,33 +432,13 @@ class RobotImageDataset(BaseImageDataset):
             # 1. 加载原始样本
             # 获取idx对应的原始样本
             sample = self.sampler.sample_sequence(idx)
+            print(f"样本 {idx} 的原始序列索引范围: {self.sampler.indices[idx]}")  # 打印采样的原始帧范围
             data = self._sample_to_data(sample)  # 转为观测和动作的字典格式
-            # 应用Mix-Up 
-            # 开启use_mixup并且满足随机数小于设定的概率条件
-            if self.aug_config['use_mixup'] and random.random() < self.aug_config['mixup']['prob']:
-                # 随机选择一个样本进行Mix-Up，并转换成相同的格式
-                mix_idx = random.randint(0, len(self) - 1)
-                mix_sample = self.sampler.sample_sequence(mix_idx)
-                mix_data = self._sample_to_data(mix_sample)
-                # 生成混合系数
-                # 使用Beta分布生成混合系数，并确保λ ≥ 0.5（通过lam = max(lam, 1 - lam)实现
-                lam = np.random.beta(
-                    self.aug_config['mixup']['alpha'], 
-                    self.aug_config['mixup']['alpha']
-                )
-                lam = max(lam, 1 - lam)
-
-                # 混合所有相机图像、agent位置和动作
-                data["obs"]["head_cam"] = lam * data["obs"]["head_cam"] + (1 - lam) * mix_data["obs"]["head_cam"]
-                data["obs"]["front_cam"] = lam * data["obs"]["front_cam"] + (1 - lam) * mix_data["obs"]["front_cam"]
-                data["obs"]["left_cam"] = lam * data["obs"]["left_cam"] + (1 - lam) * mix_data["obs"]["left_cam"]
-                data["obs"]["right_cam"] = lam * data["obs"]["right_cam"] + (1 - lam) * mix_data["obs"]["right_cam"]
-                data["obs"]["agent_pos"] = lam * data["obs"]["agent_pos"] + (1 - lam) * mix_data["obs"]["agent_pos"]
-                data["action"] = lam * data["action"] + (1 - lam) * mix_data["action"]
-
+            data = self._augment_data(data)  # 应用增强
             return dict_apply(data, torch.from_numpy)
             
         elif isinstance(idx, np.ndarray):
+            # print(f"采样批量索引: {idx}")
             assert len(idx) == self.batch_size
             for k, v in self.sampler.replay_buffer.items():
                 batch_sample_sequence(
@@ -404,26 +448,64 @@ class RobotImageDataset(BaseImageDataset):
                     idx,
                     self.sampler.sequence_length,
                 )
-            return self.buffers_torch
+            # 逐样本增强并构建批量数据
+            batch_obs = {
+                "head_cam": [], "front_cam": [], "left_cam": [], 
+                "right_cam": [], "agent_pos": []
+            }
+            batch_action = []
+            
+            for i in range(self.batch_size):
+                # 提取单样本原始数据
+                sample = {
+                    "head_camera": self.buffers["head_camera"][i],
+                    "front_camera": self.buffers["front_camera"][i],
+                    "left_camera": self.buffers["left_camera"][i],
+                    "right_camera": self.buffers["right_camera"][i],
+                    "state": self.buffers["state"][i],
+                    "action": self.buffers["action"][i],
+                }
+                # # 格式转换 + 增强
+                # data = self._sample_to_data(sample)
+                # data = self._augment_data(data)
+                
+                # 格式转换（未增强）
+                original_data = self._sample_to_data(sample)
+                # 应用增强
+                data = self._augment_data(original_data)
+                # # 可视化第1个批量中的第1个样本（避免过多文件）
+                # if i == 0:
+                #     self._save_augmentation_vis(original_data, data, idx[0], is_batch=True)
+
+
+                # 收集到批量列表
+                for k in batch_obs:
+                    batch_obs[k].append(data["obs"][k])
+                batch_action.append(data["action"])
+            
+            # 堆叠为批量张量（B, T, ...）
+            batch_data = {
+                "obs": {
+                    k: np.stack(v, axis=0) for k, v in batch_obs.items()
+                },
+                "action": np.stack(batch_action, axis=0)
+            }
+            return dict_apply(batch_data, torch.from_numpy)
+            # return self.buffers_torch
         else:
             raise ValueError(idx)
 
     def postprocess(self, samples, device):
-        agent_pos = samples["state"].to(device, non_blocking=True)
-        head_cam = samples["head_camera"].to(device, non_blocking=True) / 255.0
-        front_cam = samples['front_camera'].to(device, non_blocking=True) / 255.0
-        left_cam = samples['left_camera'].to(device, non_blocking=True) / 255.0
-        right_cam = samples['right_camera'].to(device, non_blocking=True) / 255.0
-        action = samples["action"].to(device, non_blocking=True)
+        
         return {
             "obs": {
-                "head_cam": head_cam,  # B, T, 3, H, W
-                'front_cam': front_cam, # B, T, 3, H, W
-                'left_cam': left_cam, # B, T, 3, H, W
-                'right_cam': right_cam, # B, T, 3, H, W
-                "agent_pos": agent_pos,  # B, T, D
+                "head_cam": samples["obs"]["head_cam"].to(device, non_blocking=True),
+                "front_cam": samples["obs"]["front_cam"].to(device, non_blocking=True),
+                "left_cam": samples["obs"]["left_cam"].to(device, non_blocking=True),
+                "right_cam": samples["obs"]["right_cam"].to(device, non_blocking=True),
+                "agent_pos": samples["obs"]["agent_pos"].to(device, non_blocking=True),
             },
-            "action": action,  # B, T, D
+            "action": samples["action"].to(device, non_blocking=True),
         }
 
 

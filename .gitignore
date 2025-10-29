@@ -28,3 +28,7 @@ envs/curobo/*
 
 /*.json*
 /*.txt
+.idea/*
+*.png
+*.jpg
+*.gif

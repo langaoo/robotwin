@@ -182,7 +182,8 @@ class ACT:
         # Prepare images following imitate_episodes.py pattern
         # Stack images from all cameras
         curr_images = []
-        camera_names = ["head_cam", "left_cam", "right_cam"]
+        camera_names = ["head_cam"]
+        print("camera_names used:", camera_names)
         for cam_name in camera_names:
             curr_images.append(obs[cam_name])
         curr_image = np.stack(curr_images, axis=0)
