@@ -325,6 +325,7 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
+    start_seed = st_seed  # preserve start seed for logging
     suc_nums = []
     test_num = 100
     topk = 1
@@ -345,10 +346,25 @@ def main(usr_args):
     topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
 
     file_path = os.path.join(save_dir, f"_result.txt")
+    # build checkpoint info (DP-specific when applicable)
+    ckpt_info = None
+    try:
+        if policy_name == "DP":
+            ckpt_num = usr_args.get("checkpoint_num", "?")
+            expert_num = usr_args.get("expert_data_num", "?")
+            ckpt_info = f"./policy/DP/checkpoints/{task_name}-{ckpt_setting}-{expert_num}_multi_cam-{seed}/{ckpt_num}.ckpt"
+        else:
+            ckpt_info = str(usr_args.get("checkpoint_num", "N/A"))
+    except Exception:
+        ckpt_info = str(usr_args.get("checkpoint_num", "N/A"))
+
     with open(file_path, "w") as file:
         file.write(f"Timestamp: {current_time}\n\n")
-        file.write(f"Instruction Type: {instruction_type}\n\n")
-        # file.write(str(task_reward) + '\n')
+        file.write(f"Instruction Type: {instruction_type}\n")
+        file.write(f"Checkpoint: {ckpt_info}\n")
+        file.write(f"Seed Start: {start_seed}\n")
+        file.write(f"Expert Episodes: {usr_args.get('expert_data_num', 'N/A')}\n\n")
+        # success rate(s)
         file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
 
     print(f"Data has been saved to {file_path}")

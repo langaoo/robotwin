@@ -51,8 +51,9 @@ class RobotImageDataset(BaseImageDataset):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
-            keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
-            # keys=["head_camera", "state", "action"],
+            # keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
+            # keys=['head_camera', 'front_camera', 'state', 'action'],
+            keys=["head_camera", "front_camera", "state", "action"],
         )
 
         # 加载task_config中的增强参数
@@ -76,6 +77,7 @@ class RobotImageDataset(BaseImageDataset):
 
         self.batch_size = batch_size
         sequence_length = self.sampler.sequence_length
+        print("每一个样本的帧数：" + str(sequence_length))
         self.buffers = {
             k: np.zeros((batch_size, sequence_length, *v.shape[1:]), dtype=v.dtype)
             for k, v in self.sampler.replay_buffer.items()
@@ -170,7 +172,8 @@ class RobotImageDataset(BaseImageDataset):
         """
         os.makedirs(save_dir, exist_ok=True)
         
-        cam_names = ['head_cam', 'front_cam', 'left_cam', 'right_cam']
+        # cam_names = ['head_cam', 'front_cam', 'left_cam', 'right_cam']
+        cam_names = ['head_cam', 'front_cam']
         
         # 只保存第一个样本的第一帧
         sample_idx = 0
@@ -341,8 +344,8 @@ class RobotImageDataset(BaseImageDataset):
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         normalizer["head_cam"] = get_image_range_normalizer()
         normalizer["front_cam"] = get_image_range_normalizer()
-        normalizer["left_cam"] = get_image_range_normalizer()
-        normalizer["right_cam"] = get_image_range_normalizer()
+        # normalizer["left_cam"] = get_image_range_normalizer()
+        # normalizer["right_cam"] = get_image_range_normalizer()
         return normalizer
 
     def __len__(self) -> int:
@@ -353,8 +356,8 @@ class RobotImageDataset(BaseImageDataset):
         # 原始数据格式：zarr中保存的是(T, C, H, W)格式
         head_cam = sample["head_camera"].astype(np.float32)
         front_cam = sample['front_camera'].astype(np.float32)
-        left_cam = sample['left_camera'].astype(np.float32)
-        right_cam = sample['right_camera'].astype(np.float32)
+        # left_cam = sample['left_camera'].astype(np.float32)
+        # right_cam = sample['right_camera'].astype(np.float32)
 
      
 
@@ -362,8 +365,8 @@ class RobotImageDataset(BaseImageDataset):
             "obs": {
                 "head_cam": head_cam,  # T, 3, H, W
                 'front_cam': front_cam, # T, 3, H, W
-                'left_cam': left_cam, # T, 3, H, W
-                'right_cam': right_cam, # T, 3, H, W
+                # 'left_cam': left_cam, # T, 3, H, W
+                # 'right_cam': right_cam, # T, 3, H, W
                 "agent_pos": agent_pos,  # T, D
             },
             "action": sample["action"].astype(np.float32),  # T, D
@@ -589,8 +592,8 @@ class RobotImageDataset(BaseImageDataset):
                 "obs": {
                     "head_cam": self.buffers["head_camera"].astype(np.float32),  # (B, T, C, H, W)
                     "front_cam": self.buffers["front_camera"].astype(np.float32),
-                    "left_cam": self.buffers["left_camera"].astype(np.float32),
-                    "right_cam": self.buffers["right_camera"].astype(np.float32),
+                    # "left_cam": self.buffers["left_camera"].astype(np.float32),
+                    # "right_cam": self.buffers["right_camera"].astype(np.float32),
                     "agent_pos": self.buffers["state"].astype(np.float32),  # (B, T, D)
                 },
                 "action": self.buffers["action"].astype(np.float32)  # (B, T, D)
@@ -611,8 +614,8 @@ class RobotImageDataset(BaseImageDataset):
         all_cams = torch.stack([
             samples["obs"]["head_cam"],
             samples["obs"]["front_cam"],
-            samples["obs"]["left_cam"],
-            samples["obs"]["right_cam"]
+            # samples["obs"]["left_cam"],
+            # samples["obs"]["right_cam"]
         ], dim=0)
         
         # 保存原始图像用于对比
@@ -719,11 +722,11 @@ class RobotImageDataset(BaseImageDataset):
         all_cams_aug = (all_cams_aug * 255.0).to(torch.uint8).float()
         
         # 重新分离各个摄像头 (4*B*L, C, H, W) -> (4, B, L, C, H, W)
+        # all_cams_aug = rearrange(all_cams_aug, '(n b l) c h w -> n b l c h w', 
+        #                          n=4, b=batch_size)
         all_cams_aug = rearrange(all_cams_aug, '(n b l) c h w -> n b l c h w', 
-                                 n=4, b=batch_size)
-        
-        
-        
+                                 n=2, b=batch_size)
+
         # # 保存增强可视化（只在前几个batch保存，避免过多文件）
         # if not hasattr(self, '_vis_counter'):
         #     self._vis_counter = 0
@@ -736,8 +739,8 @@ class RobotImageDataset(BaseImageDataset):
             "obs": {
                 "head_cam": all_cams_aug[0].to(device, non_blocking=True),
                 "front_cam": all_cams_aug[1].to(device, non_blocking=True),
-                "left_cam": all_cams_aug[2].to(device, non_blocking=True),
-                "right_cam": all_cams_aug[3].to(device, non_blocking=True),
+                # "left_cam": all_cams_aug[2].to(device, non_blocking=True),
+                # "right_cam": all_cams_aug[3].to(device, non_blocking=True),
                 "agent_pos": samples["obs"]["agent_pos"].to(device, non_blocking=True),
             },
             "action": samples["action"].to(device, non_blocking=True),

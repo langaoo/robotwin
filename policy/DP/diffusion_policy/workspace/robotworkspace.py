@@ -60,6 +60,17 @@ class RobotWorkspace(BaseWorkspace):
         seed = cfg.training.seed
         head_camera_type = cfg.head_camera_type
 
+        # ========== one-time display of used camera keys (from shape_meta) ==========
+        try:
+            obs_meta = cfg.shape_meta.get("obs", {})
+            used_rgb_cams = [k for k, v in obs_meta.items() if v.get("type", "low_dim") == "rgb"]
+            if len(used_rgb_cams) > 0:
+                print(f"[Training] 使用的摄像头: {', '.join(used_rgb_cams)}")
+            else:
+                print("[Training] 未在 shape_meta 中发现 rgb 相机键")
+        except Exception as e:
+            print(f"[Training] 无法解析 shape_meta 中的摄像头信息: {e}")
+
         # --------------------------
         # 1. 微调模式（优先级高于断点续训）
         # --------------------------
@@ -202,7 +213,10 @@ class RobotWorkspace(BaseWorkspace):
         # )
 
         # configure checkpoint
-        print("------------------------------"+str(self.output_dir))
+        print("日志输出路径："+str(self.output_dir))
+        save_name = cfg.training.save_path if cfg.training.save_path  else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
+        print(f"保存路径: checkpoints/{save_name}-{seed}")
+        
         topk_manager = TopKCheckpointManager(save_dir=os.path.join(self.output_dir, "checkpoints"),
                                              **cfg.checkpoint.topk)
 
@@ -381,7 +395,8 @@ class RobotWorkspace(BaseWorkspace):
                 # checkpoint
                 if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
                     # checkpointing
-                    save_name = pathlib.Path(self.cfg.task.dataset.zarr_path).stem
+                    # save_name = pathlib.Path(self.cfg.task.dataset.zarr_path).stem
+                    save_name = cfg.training.save_path if cfg.training.save_path  else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
                     if cfg.finetune.isfinetune:
                         self.save_checkpoint(f"checkpoints/{save_name}-{cfg.finetune.base_model}-{seed}/{self.epoch + 1}.ckpt")  # TODO
 

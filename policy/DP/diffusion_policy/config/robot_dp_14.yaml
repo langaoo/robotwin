@@ -128,7 +128,7 @@ training:
   max_val_steps: null
   # misc
   tqdm_interval_sec: 1.0
-
+  save_path: null
 
 logging:
   project: diffusion_policy_debug
