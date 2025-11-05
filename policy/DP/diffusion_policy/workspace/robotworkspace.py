@@ -202,6 +202,7 @@ class RobotWorkspace(BaseWorkspace):
         # )
 
         # configure checkpoint
+        print("------------------------------"+str(self.output_dir))
         topk_manager = TopKCheckpointManager(save_dir=os.path.join(self.output_dir, "checkpoints"),
                                              **cfg.checkpoint.topk)
 
@@ -227,6 +228,22 @@ class RobotWorkspace(BaseWorkspace):
         # training loop
         log_path = os.path.join(self.output_dir, "logs.json.txt")
 
+        # helper: compute global grad norm (L2)
+        def _compute_grad_norm(model):
+            total = 0.0
+            has_grad = False
+            for p in model.parameters():
+                if p.grad is not None:
+                    has_grad = True
+                    # use .detach() to avoid graph
+                    g = p.grad.detach()
+                    total += float(torch.sum(g * g).item())
+            if not has_grad:
+                return 0.0
+            return float(total) ** 0.5
+
+        prev_grad_norm = None
+
         with JsonLogger(log_path) as json_logger:
             while self.epoch < cfg.training.num_epochs:
                 step_log = dict()
@@ -251,6 +268,15 @@ class RobotWorkspace(BaseWorkspace):
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
 
+                        # compute gradient norm after backward for logging
+                        try:
+                            grad_norm = _compute_grad_norm(self.model)
+                        except Exception:
+                            grad_norm = None
+                        grad_delta = None
+                        if prev_grad_norm is not None and grad_norm is not None:
+                            grad_delta = grad_norm - prev_grad_norm
+
                         # step optimizer
                         if (self.global_step % cfg.training.gradient_accumulate_every == 0):
                             self.optimizer.step()
@@ -263,7 +289,12 @@ class RobotWorkspace(BaseWorkspace):
 
                         # logging
                         raw_loss_cpu = raw_loss.item()
-                        tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                        postfix = {"loss": round(raw_loss_cpu, 6)}
+                        if grad_norm is not None:
+                            postfix["grad"] = round(float(grad_norm), 6)
+                        if grad_delta is not None:
+                            postfix["dgrad"] = round(float(grad_delta), 6)
+                        tepoch.set_postfix(postfix, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
                             "train_loss": raw_loss_cpu,
@@ -271,6 +302,13 @@ class RobotWorkspace(BaseWorkspace):
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
                         }
+
+                        # attach gradient stats to log
+                        if grad_norm is not None:
+                            step_log["grad_norm_l2"] = grad_norm
+                        if grad_delta is not None:
+                            step_log["grad_norm_delta"] = grad_delta
+                        prev_grad_norm = grad_norm if grad_norm is not None else prev_grad_norm
 
                         is_last_batch = batch_idx == (len(train_dataloader) - 1)
                         if not is_last_batch:

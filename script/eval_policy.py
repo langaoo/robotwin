@@ -158,6 +158,7 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
+    # st_seed = 0
     suc_nums = []
     test_num = 100
     topk = 1

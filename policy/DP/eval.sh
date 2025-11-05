@@ -23,4 +23,5 @@ python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
     --task_config ${task_config} \
     --ckpt_setting ${ckpt_setting} \
     --expert_data_num ${expert_data_num} \
+    --checkpoint_num ${checkpoint_num} \
     --seed ${seed}
