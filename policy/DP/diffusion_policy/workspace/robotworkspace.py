@@ -1,3 +1,5 @@
+import time
+
 if __name__ == "__main__":
     import sys
     import os
@@ -25,6 +27,8 @@ from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
+import matplotlib.pyplot as plt
+import torchvision.transforms as T
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -50,6 +54,8 @@ class RobotWorkspace(BaseWorkspace):
 
         # configure training state
         self.optimizer = hydra.utils.instantiate(cfg.optimizer, params=self.model.parameters())
+        self.save_name = cfg.training.save_path if cfg.training.save_path  else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
+
 
         # configure training state
         self.global_step = 0
@@ -74,6 +80,7 @@ class RobotWorkspace(BaseWorkspace):
         # --------------------------
         # 1. 微调模式（优先级高于断点续训）
         # --------------------------
+        # time.sleep(10)
         if cfg.finetune.isfinetune and cfg.finetune.resume_from:
             pretrained_path = pathlib.Path(cfg.finetune.resume_from)
             print()
@@ -275,6 +282,50 @@ class RobotWorkspace(BaseWorkspace):
                 ) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         batch = dataset.postprocess(batch, device)
+
+                        # if self.global_step == 0 and batch_idx == 0:
+                        #     imgs = batch['obs']['head_cam']  # shape [B,T,C,H,W] 或 [T,C,H,W]
+                        #     print("head_cam dtype:", imgs.dtype)
+                        #     print("head_cam shape:", imgs.shape)
+                        #     print("value range (min,max):",
+                        #           float(imgs.min()), float(imgs.max()))
+
+                        # # 打印batch形状信息
+                        # print("Batch shapes:")
+                        # for key in batch:
+                        #     if isinstance(batch[key], dict):
+                        #         print(f"  {key}:")
+                        #         for sub_key, value in batch[key].items():
+                        #             print(f"    {sub_key}: {value.shape}")
+                        #     else:
+                        #         print(f"  {key}: {batch[key].shape}")
+
+                        # # 提取第一个样本（索引0）
+                        # sample = dict_apply(batch, lambda x: x[0].cpu())  # 取第0个样本并转移到CPU
+
+                        # # 从obs中获取head_cam图像（形状为[T, 3, H, W]）
+                        # images = sample['obs']['head_cam']  # T是时间步长，3是通道数(RGB)
+
+                        # # 图像转换：将张量转为PIL图像格式（[C, H, W] -> [H, W, C]，并还原像素值）
+                        # to_pil = T.ToPILImage()
+
+                        # # 创建可视化窗口
+                        # plt.figure(figsize=(15, 3))
+                        # for t in range(min(5, len(images))):  # 可视化前5个时间步的图像
+                        #     img_tensor = images[t]  # 单个时间步的图像：[3, H, W]
+                        #     img = to_pil(img_tensor)  # 转换为PIL图像（自动处理通道和像素值）
+                            
+                        #     plt.subplot(1, 5, t+1)
+                        #     plt.imshow(img)
+                        #     plt.title(f"Time step {t}")
+                        #     plt.axis('off')
+
+                        # # 保存图像到输出目录
+                        # save_path = os.path.join(self.output_dir, "sample_images.png")
+                        # plt.savefig(save_path, bbox_inches='tight')
+                        # plt.close()
+                        # print(f"Sample images saved to {save_path}")
+
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
                         # compute loss
@@ -393,15 +444,12 @@ class RobotWorkspace(BaseWorkspace):
                         del mse
 
                 # checkpoint
-                if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
-                    # checkpointing
-                    # save_name = pathlib.Path(self.cfg.task.dataset.zarr_path).stem
-                    save_name = cfg.training.save_path if cfg.training.save_path  else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
-                    if cfg.finetune.isfinetune:
-                        self.save_checkpoint(f"checkpoints/{save_name}-{cfg.finetune.base_model}-{seed}/{self.epoch + 1}.ckpt")  # TODO
-
-                    else:
-                        self.save_checkpoint(f"checkpoints/{save_name}-{seed}/{self.epoch + 1}.ckpt")  # TODO
+                if cfg.finetune.isfinetune:
+                    if ((self.epoch + 1) % cfg.finetune.checkpoint_every) == 0:
+                        self.save_checkpoint(f"checkpoints/{self.save_name}-{cfg.finetune.base_model}-{seed}/{self.epoch + 1}.ckpt")  # TODO
+                else:
+                    if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
+                        self.save_checkpoint(f"checkpoints/{self.save_name}-{seed}/{self.epoch + 1}.ckpt")  # TODO
 
                 # ========= eval end for this epoch ==========
                 policy.train()

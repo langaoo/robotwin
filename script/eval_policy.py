@@ -157,7 +157,7 @@ def main(usr_args):
 
     seed = usr_args["seed"]
 
-    st_seed = 100000 * (1 + seed)
+    st_seed = 10000 * (1 + seed)
     start_seed = st_seed  # preserve start seed for logging
     # st_seed = 0
     suc_nums = []

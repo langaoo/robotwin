@@ -74,14 +74,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: False
   pin_memory: True
   persistent_workers: False
@@ -91,8 +91,9 @@ finetune:
   # resume_from: /home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_clean-200-0/600.ckpt
   resume_from: null # 微调模型路径
   base_model: null  # 微调模型的基础模型配置ckpt使用的配置文件的名称
-  freeze_encoder: True  # 微调时是否冻结编码器
-  reset_optimizer: True  # 微调时是否重置优化器
+  freeze_encoder: False  # 微调时是否冻结编码器
+  reset_optimizer: False  # 微调时是否重置优化器
+  checkpoint_every: 10  # 微调时的checkpoint保存频率
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -107,7 +108,7 @@ training:
   seed: 42
   debug: False
   resume: False
-  # resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/beat_block_hammer-demo_randomized-50_multi_cam-0/500.ckpt" # null
+  # resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/data/beat_block_hammer-demo_trans-50_h-0" # null
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500

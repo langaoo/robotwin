@@ -44,7 +44,7 @@ fi
 export HYDRA_FULL_ERROR=1 
 export CUDA_VISIBLE_DEVICES=${gpu_id}
 
-if [ ! -d "./data/${task_name}-${task_config}-${expert_data_num}.zarr" ]; then
+if [ ! -d "./data/${task_name}-${task_config}-${expert_data_num}_multi_cam.zarr" ]; then
     bash process_data.sh ${task_name} ${task_config} ${expert_data_num}
 fi
 
@@ -52,7 +52,7 @@ python train.py --config-name=${config_name}.yaml \
                             task.name=${task_name} \
                             task.dataset.task_config_path="../../task_config/${task_config}.yml" \
                             task.dataset.zarr_path="data/${task_name}-${task_config}-${expert_data_num}_multi_cam.zarr" \
-                            training.save_path="data/${task_name}-${task_config}-${expert_data_num}_hf" \
+                            training.save_path="data/${task_name}-${task_config}-${expert_data_num}_h" \
                             training.debug=$DEBUG \
                             training.seed=${seed} \
                             training.device="cuda:0" \
@@ -66,6 +66,6 @@ python train.py --config-name=${config_name}.yaml \
                             finetune.isfinetune=${isfinetune} \
                             training.num_epochs=${epoch_num} \
                             finetune.resume_from=${resume_from} \
-                            finetune.base_model=${basemodel} \
+                            finetune.base_model=${basemodel}
                             # checkpoint.save_ckpt=${save_ckpt}
                             # hydra.run.dir=${run_dir} \

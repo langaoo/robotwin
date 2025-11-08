@@ -53,20 +53,22 @@ def main(cfg: OmegaConf):
     # 设置主摄像头（head_cam）的尺寸
     cfg.task.image_shape = [3, cam_h, cam_w]
     cfg.task.shape_meta.obs.head_cam.shape = [3, cam_h, cam_w]
-
+    print("设置task.image_shape为:", cfg.task.image_shape)
+    print("设置head_cam尺寸为:", cfg.task.shape_meta.obs.head_cam.shape)
 
     # 新增：设置其他摄像头（front/left/right）的尺寸
     # 假设这些摄像头与head_cam型号相同，使用相同的高宽
     # other_cams = ["front_cam", "left_cam", "right_cam"]
-    other_cams = ["front_cam"]
-    for cam in other_cams:
-        if cam in cfg.task.shape_meta.obs:
-            cfg.task.shape_meta.obs[cam].shape = [3, cam_h, cam_w]
-        else:
-            # 若配置中未定义该摄像头，添加默认配置
-            cfg.task.shape_meta.obs[cam] = OmegaConf.create({
-                "shape": [3, cam_h, cam_w]
-            })
+
+    # other_cams = ["front_cam"]
+    # for cam in other_cams:
+    #     if cam in cfg.task.shape_meta.obs:
+    #         cfg.task.shape_meta.obs[cam].shape = [3, cam_h, cam_w]
+    #     else:
+    #         # 若配置中未定义该摄像头，添加默认配置
+    #         cfg.task.shape_meta.obs[cam] = OmegaConf.create({
+    #             "shape": [3, cam_h, cam_w]
+    #         })
 
     OmegaConf.resolve(cfg)
     cfg.task.image_shape = [3, cam_h, cam_w]
@@ -75,10 +77,12 @@ def main(cfg: OmegaConf):
         cam_h,
         cam_w,
     ]
-    for cam in other_cams:
-        cfg.task.shape_meta.obs[cam].shape = [3, cam_h, cam_w]
+
+    # for cam in other_cams:
+    #     cfg.task.shape_meta.obs[cam].shape = [3, cam_h, cam_w]
 
     cls = hydra.utils.get_class(cfg._target_)
+    print("Training 1:")
     workspace: BaseWorkspace = cls(cfg)
     print(cfg.task.dataset.zarr_path, cfg.task_name)
     workspace.run()
