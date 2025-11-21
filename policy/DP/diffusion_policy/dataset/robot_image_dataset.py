@@ -52,8 +52,8 @@ class RobotImageDataset(BaseImageDataset):
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
             # keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
-            # keys=['head_camera', 'front_camera', 'state', 'action'],
-            keys=['head_camera', 'state', 'action'],
+            keys=['head_camera', 'front_camera', 'state', 'action'],
+            # keys=['head_camera', 'state', 'action'],
         )
 
         # 加载task_config中的增强参数
@@ -97,6 +97,184 @@ class RobotImageDataset(BaseImageDataset):
         #     'left_cam': tuple(self.replay_buffer['left_camera'].shape[-2:]),
         #     'right_cam': tuple(self.replay_buffer['right_camera'].shape[-2:]),
         # }
+        # 构建 episode 起始帧索引映射表（用于 mixup）
+        self._build_episode_start_map()
+        
+        # 初始化随机数生成器
+        self.rng = np.random.default_rng(seed)
+
+    def _build_episode_start_map(self):
+        """构建每个 episode 的起始帧索引映射"""
+        episode_ends = self.replay_buffer.episode_ends[:]
+        self.episode_starts = np.zeros(len(episode_ends), dtype=np.int64)
+        
+        for i in range(len(episode_ends)):
+            if i == 0:
+                self.episode_starts[i] = 0
+            else:
+                self.episode_starts[i] = episode_ends[i - 1]
+        
+        # 只保留训练集中的 episode 起始帧索引
+        train_episode_ids = np.where(self.train_mask)[0]
+        self.train_episode_starts = self.episode_starts[train_episode_ids]
+        
+        # 构建从帧索引到 episode ID 的映射（用于快速查找当前样本属于哪个episode）
+        self.frame_to_episode = np.zeros(episode_ends[-1], dtype=np.int64)
+        for ep_idx in range(len(episode_ends)):
+            start_idx = 0 if ep_idx == 0 else episode_ends[ep_idx - 1]
+            end_idx = episode_ends[ep_idx]
+            self.frame_to_episode[start_idx:end_idx] = ep_idx
+        
+        # 为每个训练集episode ID 创建可选择的其他episode起始帧列表
+        self.other_episode_starts_map = {}
+        for ep_idx in train_episode_ids:
+            # 排除当前episode的起始帧，只保留其他episode的第一帧
+            other_starts = [self.episode_starts[i] for i in train_episode_ids if i != ep_idx]
+            self.other_episode_starts_map[ep_idx] = np.array(other_starts)
+        
+        print(f"训练集中有 {len(self.train_episode_starts)} 个 episode 可用于 mixup")
+    
+    def _apply_mixup(self, samples, batch_indices):
+        """
+        对批次数据应用 mixup 增强
+        将每个样本的所有帧与另一个**不同 episode** 的起始帧进行混合
+        
+        Args:
+            samples: 字典，包含 'obs' 和 'action'
+                obs['head_cam']: (B, T, C, H, W)
+                obs['agent_pos']: (B, T, D)
+                action: (B, T, D)
+            batch_indices: (B,) 当前batch中每个样本的索引
+        
+        Returns:
+            混合后的 samples
+        """
+        if not self.aug_config['use_mixup']:
+            return samples
+        
+        mixup_prob = self.aug_config['mixup']['prob']
+        alpha = self.aug_config['mixup']['alpha']
+        
+        batch_size = samples['obs']['head_cam'].shape[0]
+        sequence_length = samples['obs']['head_cam'].shape[1]
+        
+        # 初始化可视化标志（只在第一次调用时可视化）
+        if not hasattr(self, '_mixup_vis_done'):
+            self._mixup_vis_done = False
+        
+        # 遍历批次中的每个样本
+        for b in range(batch_size):
+            # 以一定概率应用 mixup
+            if self.rng.random() > mixup_prob:
+                continue
+            
+            # 从 beta 分布采样混合权重
+            lam = self.rng.beta(alpha, alpha)
+            
+            # 获取当前样本的第一帧在 replay_buffer 中的索引
+            sample_idx = batch_indices[b]
+            buffer_start_idx = self.sampler.indices[sample_idx][0]  # (buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx)
+            
+            # 确定当前样本属于哪个 episode
+            current_episode_id = self.frame_to_episode[buffer_start_idx]
+            
+            # 从其他 episode 中随机选择一个起始帧
+            if current_episode_id in self.other_episode_starts_map:
+                other_starts = self.other_episode_starts_map[current_episode_id]
+                if len(other_starts) == 0:
+                    # 如果没有其他episode可选（训练集只有1个episode），跳过mixup
+                    continue
+                other_episode_start_idx = self.rng.choice(other_starts)
+            else:
+                # 当前episode不在训练集中（不应该发生），跳过
+                continue
+            
+            # 获取另一个 episode 的起始帧数据
+            other_head_cam = self.replay_buffer['head_camera'][other_episode_start_idx]  # (C, H, W)
+            
+            # # ✅ 可视化部分：只在第一次mixup时保存图像
+            # if not self._mixup_vis_done:
+            #     self._visualize_mixup(
+            #         current_frame=samples['obs']['head_cam'][b, 0].copy(),  # 当前样本第一帧
+            #         other_first_frame=other_head_cam.copy(),  # 另一个episode的第一帧
+            #         lam=lam,
+            #         current_episode_id=current_episode_id,
+            #         other_episode_start_idx=other_episode_start_idx,
+            #         buffer_start_idx=buffer_start_idx
+            #     )
+            #     self._mixup_vis_done = True
+            
+            # 将当前样本的所有帧与另一个 episode 的起始帧进行 mixup
+            for t in range(sequence_length):
+                current_frame = samples['obs']['head_cam'][b, t]  # (C, H, W)
+                
+                # 执行 mixup：当前帧占主导，背景帧为辅助
+                # 反转权重：让当前帧的权重更大（1-λ），背景帧权重更小（λ）
+                mixed_frame = 0.85 * current_frame + 0.15 * other_head_cam
+                
+                # 更新当前帧
+                samples['obs']['head_cam'][b, t] = mixed_frame
+        
+        return samples
+    
+    # def _visualize_mixup(self, current_frame, other_first_frame, lam, 
+    #                     current_episode_id, other_episode_start_idx, buffer_start_idx):
+    #     """
+    #     可视化mixup过程：显示当前帧、另一个episode的第一帧、以及混合后的结果
+        
+    #     Args:
+    #         current_frame: 当前样本的第一帧 (C, H, W)
+    #         other_first_frame: 另一个episode的第一帧 (C, H, W)
+    #         lam: mixup权重
+    #         current_episode_id: 当前episode ID
+    #         other_episode_start_idx: 另一个episode的起始帧索引
+    #         buffer_start_idx: 当前样本的起始帧索引
+    #     """
+    #     save_dir = "mixup_visualization"
+    #     os.makedirs(save_dir, exist_ok=True)
+        
+    #     # 执行mixup（权重已反转：当前帧占主导）
+    #     mixed_frame = (1 - lam) * current_frame + lam * other_first_frame
+        
+    #     # 转换为可视化格式 (H, W, C)
+    #     def to_vis_format(img):
+    #         img = np.transpose(img, (1, 2, 0))  # C,H,W -> H,W,C
+    #         img = np.clip(img, 0, 255).astype(np.uint8)
+    #         return img
+        
+    #     current_vis = to_vis_format(current_frame)
+    #     other_vis = to_vis_format(other_first_frame)
+    #     mixed_vis = to_vis_format(mixed_frame)
+        
+    #     # 创建可视化图
+    #     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        
+    #     axes[0].imshow(current_vis)
+    #     axes[0].set_title(f"当前样本第一帧\nEpisode ID: {current_episode_id}\n帧索引: {buffer_start_idx}", fontsize=12)
+    #     axes[0].axis('off')
+        
+    #     axes[1].imshow(other_vis)
+    #     axes[1].set_title(f"另一个Episode的第一帧\n帧索引: {other_episode_start_idx}", fontsize=12)
+    #     axes[1].axis('off')
+        
+    #     axes[2].imshow(mixed_vis)
+    #     axes[2].set_title(f"Mixup结果\n(1-λ)={1-lam:.3f} (当前帧权重)\nλ={lam:.3f} (背景权重)", fontsize=12)
+    #     axes[2].axis('off')
+        
+    #     plt.tight_layout()
+    #     save_path = os.path.join(save_dir, "mixup_first_visualization.png")
+    #     plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    #     plt.close()
+        
+    #     print(f"\n{'='*60}")
+    #     print(f"✅ Mixup可视化已保存到: {save_path}")
+    #     print(f"📊 Mixup详情:")
+    #     print(f"   - 当前Episode ID: {current_episode_id}")
+    #     print(f"   - 当前样本起始帧索引: {buffer_start_idx}")
+    #     print(f"   - 混合的另一个Episode起始帧索引: {other_episode_start_idx}")
+    #     print(f"   - Mixup权重 (1-λ): {1-lam:.3f} (当前帧), λ: {lam:.3f} (背景帧)")
+    #     print(f"{'='*60}\n")
+
 
     def _load_augmentation_config(self, config_path):
         """从task_config加载增强参数"""
@@ -173,7 +351,7 @@ class RobotImageDataset(BaseImageDataset):
         os.makedirs(save_dir, exist_ok=True)
         
         # cam_names = ['head_cam', 'front_cam', 'left_cam', 'right_cam']
-        cam_names = ['head_cam']
+        cam_names = ['head_cam','front_cam']
         
         # 只保存第一个样本的第一帧
         sample_idx = 0
@@ -343,7 +521,7 @@ class RobotImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         normalizer["head_cam"] = get_image_range_normalizer()
-        # normalizer["front_cam"] = get_image_range_normalizer()
+        normalizer["front_cam"] = get_image_range_normalizer()
         # normalizer["left_cam"] = get_image_range_normalizer()
         # normalizer["right_cam"] = get_image_range_normalizer()
         return normalizer
@@ -355,7 +533,7 @@ class RobotImageDataset(BaseImageDataset):
         agent_pos = sample["state"].astype(np.float32)  # (agent_posx2, block_posex3)
         # 原始数据格式：zarr中保存的是(T, C, H, W)格式
         head_cam = sample["head_camera"].astype(np.float32)
-        # front_cam = sample['front_camera'].astype(np.float32)
+        front_cam = sample['front_camera'].astype(np.float32)
         # left_cam = sample['left_camera'].astype(np.float32)
         # right_cam = sample['right_camera'].astype(np.float32)
 
@@ -364,7 +542,7 @@ class RobotImageDataset(BaseImageDataset):
         data = {
             "obs": {
                 "head_cam": head_cam,  # T, 3, H, W
-                # 'front_cam': front_cam, # T, 3, H, W
+                'front_cam': front_cam, # T, 3, H, W
                 # 'left_cam': left_cam, # T, 3, H, W
                 # 'right_cam': right_cam, # T, 3, H, W
                 "agent_pos": agent_pos,  # T, D
@@ -591,15 +769,18 @@ class RobotImageDataset(BaseImageDataset):
             batch_data = {
                 "obs": {
                     "head_cam": self.buffers["head_camera"].astype(np.float32),  # (B, T, C, H, W)
-                    # "front_cam": self.buffers["front_camera"].astype(np.float32),
+                    "front_cam": self.buffers["front_camera"].astype(np.float32),
                     # "left_cam": self.buffers["left_camera"].astype(np.float32),
                     # "right_cam": self.buffers["right_camera"].astype(np.float32),
                     "agent_pos": self.buffers["state"].astype(np.float32),  # (B, T, D)
                 },
                 "action": self.buffers["action"].astype(np.float32)  # (B, T, D)
             }
-            
+
+             # 应用 mixup 增强（传入batch索引用于确定episode）
+            batch_data = self._apply_mixup(batch_data, idx)
             return dict_apply(batch_data, torch.from_numpy)
+        
             # return self.buffers_torch
         else:
             raise ValueError(idx)
@@ -607,7 +788,7 @@ class RobotImageDataset(BaseImageDataset):
     def postprocess(self, samples, device):
         batch_size = samples["obs"]["head_cam"].shape[0]
         # 动态构建摄像头列表（现在只有 head_cam）
-        cam_keys = ["head_cam"]  # 可扩展为 ["head_cam", "front_cam", ...]
+        cam_keys = ["head_cam", "front_cam"]  # 可扩展为 ["head_cam", "front_cam", ...]
         cam_list = [samples["obs"][key] for key in cam_keys]
         num_cams = len(cam_list)
         
@@ -737,7 +918,7 @@ class RobotImageDataset(BaseImageDataset):
         return {
             "obs": {
                 "head_cam": all_cams_aug[0].to(device, non_blocking=True),
-                # "front_cam": all_cams_aug[1].to(device, non_blocking=True),
+                "front_cam": all_cams_aug[1].to(device, non_blocking=True),
                 # "left_cam": all_cams_aug[2].to(device, non_blocking=True),
                 # "right_cam": all_cams_aug[3].to(device, non_blocking=True),
                 "agent_pos": samples["obs"]["agent_pos"].to(device, non_blocking=True),

@@ -54,8 +54,8 @@ class RobotWorkspace(BaseWorkspace):
 
         # configure training state
         self.optimizer = hydra.utils.instantiate(cfg.optimizer, params=self.model.parameters())
-        self.save_name = cfg.training.save_path if cfg.training.save_path  else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
-
+        save_path = OmegaConf.select(cfg, "training.save_path")
+        self.save_name = save_path if save_path is not None else pathlib.Path(self.cfg.task.dataset.zarr_path).stem
 
         # configure training state
         self.global_step = 0
@@ -162,6 +162,8 @@ class RobotWorkspace(BaseWorkspace):
                         except:
                             pass
                     print(f"续训状态：epoch={self.epoch}, global_step={self.global_step}")
+                    print(f"训练配置：将从 epoch {self.epoch} 训练到 epoch {cfg.training.num_epochs}")
+                    print(f"预计训练 {cfg.training.num_epochs - self.epoch} 个 epoch")
                 except Exception as e:
                     print(f"续训加载失败: {e}")
                     raise
