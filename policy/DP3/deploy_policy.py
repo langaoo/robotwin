@@ -33,7 +33,13 @@ from dp3_policy import *
 def encode_obs(observation):  # Post-Process Observation
     obs = dict()
     obs['agent_pos'] = observation['joint_action']['vector']
-    obs['point_cloud'] = observation['pointcloud']
+    # 确保点云数据是 np.ndarray 类型，与训练时保持一致
+    pointcloud = observation['pointcloud']
+    if isinstance(pointcloud, list):
+        pointcloud = np.asarray(pointcloud, dtype=np.float32)
+    elif not isinstance(pointcloud, np.ndarray):
+        pointcloud = np.array(pointcloud, dtype=np.float32)
+    obs['point_cloud'] = pointcloud
     return obs
 
 
