@@ -7,6 +7,8 @@ import copy
 from typing import Optional, Dict, Tuple, Union, List, Type
 from termcolor import cprint
 import pdb
+from diffusion_policy_3d.model.vision.ulip_extract import \
+    ULIPEncoderXYZ, ULIPEncoderXYZRGB
 
 
 def create_mlp(
@@ -203,8 +205,13 @@ class DP3Encoder(nn.Module):
         pointcloud_encoder_cfg=None,
         use_pc_color=False,
         pointnet_type="pointnet",
+       # 新增 ULIP 相关参数
+        training_mode="frozen",
+        pretrained_pointnet_path=None,
+        finetune_config=None,
     ):
         super().__init__()
+        cprint(f"[DP3Encoder] init with pointnet_type={pointnet_type}, use_pc_color={use_pc_color}", "green")
         self.imagination_key = "imagin_robot"
         self.state_key = "agent_pos"
         self.point_cloud_key = "point_cloud"
@@ -232,6 +239,23 @@ class DP3Encoder(nn.Module):
             else:
                 pointcloud_encoder_cfg.in_channels = 3
                 self.extractor = PointNetEncoderXYZ(**pointcloud_encoder_cfg)
+
+        elif pointnet_type == "ulip_xyz":
+            pointcloud_encoder_cfg.in_channels = 3
+            self.extractor = ULIPEncoderXYZ(
+                **pointcloud_encoder_cfg,
+                training_mode=training_mode,
+                pretrained_model_path=pretrained_pointnet_path
+            )
+
+        elif pointnet_type == "ulip_rgbxyz":
+            pointcloud_encoder_cfg.in_channels = 6
+            self.extractor = ULIPEncoderXYZRGB(
+                **pointcloud_encoder_cfg,
+                training_mode=training_mode,
+                pretrained_model_path=pretrained_pointnet_path
+            )
+
         else:
             raise NotImplementedError(f"pointnet_type: {pointnet_type}")
 

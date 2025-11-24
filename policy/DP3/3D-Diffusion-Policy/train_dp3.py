@@ -48,6 +48,18 @@ import pdb, random
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
+def _copy_to_cpu(data):
+    """Recursively detach tensors to CPU for checkpoint serialization."""
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu()
+    if isinstance(data, dict):
+        return {k: _copy_to_cpu(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        data_type = type(data)
+        return data_type(_copy_to_cpu(v) for v in data)
+    return data
+
+
 class TrainDP3Workspace:
     include_keys = ["global_step", "epoch"]
     exclude_keys = tuple()
@@ -76,9 +88,8 @@ class TrainDP3Workspace:
 
 
        # 配置 optimizer - 根据训练模式设置不同学习率
-       # 配置 optimizer - 根据训练模式设置不同学习率
         if cfg.pretrain.training_mode == "frozen":
-            # frozen 模式：完全排除 encoder 参数
+            # frozen 模式：冻结backbone参数，不冻结投影层
             optimizer_params = self._get_frozen_optimizer_params()
             self.optimizer = hydra.utils.instantiate(
                 cfg.optimizer, 
@@ -90,7 +101,8 @@ class TrainDP3Workspace:
             optimizer_groups = self._get_finetune_optimizer_groups(cfg)
             self.optimizer = hydra.utils.instantiate(
                 cfg.optimizer, 
-                params=optimizer_groups
+                params=optimizer_groups,
+                _convert_="all"
             )
             cprint("[TrainDP3] Using finetune mode with separate LR for encoder", "green")
         else:  # scratch
@@ -112,23 +124,27 @@ class TrainDP3Workspace:
         self._verify_freeze_status(cfg)
     
     def _get_frozen_optimizer_params(self):
-        """frozen 模式：只返回非 encoder 的参数"""
+        """frozen 模式：仅冻结 ULIP backbone，保留 projector 和后续头部可训练"""
         trainable_params = []
-        frozen_count = 0
-        trainable_count = 0
+        backbone_frozen = 0
+        projector_trainable = 0
+        other_trainable = 0
         
         for name, param in self.model.named_parameters():
-            if 'obs_encoder.extractor' in name:
-                # 确保冻结
+            if 'obs_encoder.extractor.backbone' in name:
+                # 确保 backbone 冻结
                 param.requires_grad = False
-                frozen_count += 1
+                backbone_frozen += 1
             else:
                 if param.requires_grad:
                     trainable_params.append(param)
-                    trainable_count += 1
-        
-        cprint(f"[Frozen] Encoder params frozen: {frozen_count}", "yellow")
-        cprint(f"[Frozen] Trainable params (action head): {trainable_count}", "cyan")
+                    if 'obs_encoder.extractor.projector' in name:
+                        projector_trainable += 1
+                    else:
+                        other_trainable += 1        
+        cprint(f"[Frozen] Backbone params frozen: {backbone_frozen}", "yellow")
+        cprint(f"[Frozen] Projector params trainable: {projector_trainable}", "cyan")
+        cprint(f"[Frozen] Other params trainable: {other_trainable}", "cyan")
         
         return trainable_params
 
@@ -136,24 +152,24 @@ class TrainDP3Workspace:
         """为 finetune 模式设置不同的学习率"""
         encoder_lr = cfg.optimizer.lr * cfg.pretrain.finetune_config.encoder_lr_ratio
         
-        encoder_params = []
+        encoder_backbone_params = []
         other_params = []
         
         # 初始时冻结 encoder
         for name, param in self.model.named_parameters():
-            if 'obs_encoder.extractor' in name:
+            if 'obs_encoder.extractor.backbone' in name:
                 param.requires_grad = False  # 先冻结
-                encoder_params.append(param)
+                encoder_backbone_params.append(param)
             elif param.requires_grad:
                 other_params.append(param)
         
-        cprint(f"[Finetune] Encoder params: {len(encoder_params)} (initially frozen)", "cyan")
-        cprint(f"[Finetune] Other params: {len(other_params)}", "cyan")
+        cprint(f"[Finetune] Encoder backbone params: {len(encoder_backbone_params)} (initially frozen)", "cyan")
+        cprint(f"[Finetune] Non-backbone params (包含 projector 与动作头): {len(other_params)}", "cyan")
         cprint(f"[Finetune] Encoder LR: {encoder_lr}, Main LR: {cfg.optimizer.lr}", "cyan")
         cprint(f"[Finetune] Will unfreeze at step: {cfg.pretrain.finetune_config.unfreeze_step}", "yellow")
         
         return [
-            {'params': encoder_params, 'lr': encoder_lr, 'name': 'encoder'},
+            {'params': encoder_backbone_params, 'lr': encoder_lr, 'name': 'encoder'},
             {'params': other_params, 'lr': cfg.optimizer.lr, 'name': 'head'}
         ]
 
@@ -163,43 +179,57 @@ class TrainDP3Workspace:
         cprint("Verifying Parameter Freeze Status", "cyan")
         cprint("="*60, "cyan")
         
-        encoder_trainable = 0
-        encoder_frozen = 0
+        backbone_trainable = 0
+        backbone_frozen = 0
+        projector_trainable = 0
         other_trainable = 0
         
         for name, param in self.model.named_parameters():
-            if 'obs_encoder.extractor' in name:
-
+            if 'obs_encoder.extractor.backbone' in name:
                 cprint(f"{name} requires_grad={param.requires_grad}", "yellow")
 
                 if param.requires_grad:
-                    encoder_trainable += 1
+                    backbone_trainable += 1
                 else:
-                    encoder_frozen += 1
+                    backbone_frozen += 1
+            elif 'obs_encoder.extractor.projector' in name:
+                if param.requires_grad:
+                    projector_trainable += 1
+                else:
+                    cprint(f"❌ WARNING: Projector param frozen: {name}", "red")
             elif param.requires_grad:
                 other_trainable += 1
         
-        cprint(f"Encoder - Trainable: {encoder_trainable}, Frozen: {encoder_frozen}", "yellow")
+        cprint(f"Backbone - Trainable: {backbone_trainable}, Frozen: {backbone_frozen}", "yellow")
+        cprint(f"Projector - Trainable: {projector_trainable}", "yellow")
         cprint(f"Other - Trainable: {other_trainable}", "cyan")
         
         # 根据模式验证
         if cfg.pretrain.training_mode == "frozen":
-            if encoder_trainable > 0:
-                cprint(f"❌ WARNING: Frozen mode but {encoder_trainable} encoder params are trainable!", "red")
+            if backbone_trainable > 0:
+                cprint(f"❌ WARNING: Frozen mode but {backbone_trainable} encoder params are trainable!", "red")
             else:
-                cprint("✓ Frozen mode verified: All encoder params are frozen", "green")
+                cprint("✓ Frozen mode verified: Backbone encoder params are frozen", "green")
+            if projector_trainable == 0:
+                cprint("❌ WARNING: Frozen mode should keep projector trainable!", "red")
+            else:
+                cprint("✓ Frozen mode verified: Projector remains trainable", "green")
                 
         elif cfg.pretrain.training_mode == "finetune":
-            if encoder_trainable > 0:
-                cprint(f"❌ WARNING: Finetune mode but encoder should be initially frozen!", "red")
+            if backbone_trainable > 0:
+                cprint(f"❌ WARNING: Finetune mode but encoder backbone should be initially frozen!", "red")
             else:
-                cprint("✓ Finetune mode verified: Encoder initially frozen", "green")
+                cprint("✓ Finetune mode verified: Encoder backbone initially frozen", "green")
+            if projector_trainable == 0:
+                cprint("❌ WARNING: Projector is frozen in finetune mode!", "red")
+            else:
+                cprint("✓ Finetune mode verified: Projector trainable", "green")
                 
         elif cfg.pretrain.training_mode == "scratch":
-            if encoder_trainable == 0:
-                cprint("❌ WARNING: Scratch mode but encoder is frozen!", "red")
+            if backbone_trainable == 0:
+                cprint("❌ WARNING: Scratch mode but encoder backbone is frozen!", "red")
             else:
-                cprint(f"✓ Scratch mode verified: {encoder_trainable} encoder params trainable", "green")
+                cprint(f"✓ Scratch mode verified: {backbone_trainable} backbone params trainable", "green")
         
         cprint("="*60 + "\n", "cyan")
 
@@ -216,9 +246,14 @@ class TrainDP3Workspace:
         if self.global_step >= unfreeze_step:
             cprint(f"[Finetune] Unfreezing encoder at step {self.global_step}", "green")
             for name, param in self.model.named_parameters():
-                if 'obs_encoder.extractor' in name:
+                if 'obs_encoder.extractor.backbone' in name:
                     param.requires_grad = True
             
+            extractor = getattr(self.model.obs_encoder, 'extractor', None)
+            if hasattr(extractor, 'set_backbone_train_mode'):
+                extractor.set_backbone_train_mode(True)
+                cprint("[Finetune] Encoder backbone switched to train() for BN stats", "green")
+
             self.encoder_unfrozen = True
             cprint("[Finetune] Encoder unfrozen, now trainable", "green")
             # 验证解冻成功
@@ -518,10 +553,10 @@ class TrainDP3Workspace:
             del step_log
 
     def _verify_frozen_gradients(self):
-        """验证 frozen encoder 的梯度确实为 None/0"""
+        """验证 frozen encoder backbone 的梯度确实为 None/0"""
         encoder_has_grad = False
         for name, param in self.model.named_parameters():
-            if 'obs_encoder.extractor' in name:
+            if 'obs_encoder.extractor.backbone' in name:
                 if param.grad is not None and param.grad.abs().sum() > 0:
                     cprint(f"⚠️  WARNING: {name} has non-zero gradient!", "red")
                     encoder_has_grad = True
@@ -560,7 +595,9 @@ class TrainDP3Workspace:
             ckpt_file = pathlib.Path(
                 os.path.join(
                     DP3_ROOT,
-                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}/{usr_args['checkpoint_num']}.ckpt"
+                    # f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}/{usr_args['checkpoint_num']}.ckpt"
+                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}_{cfg.policy.pointnet_type}_scratch/{usr_args['checkpoint_num']}.ckpt"
+
                 ))
         else:
             ckpt_file = pathlib.Path(

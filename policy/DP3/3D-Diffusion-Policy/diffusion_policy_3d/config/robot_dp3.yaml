@@ -15,6 +15,24 @@ dataset_obs_steps: ${n_obs_steps}
 keypoint_visible_rate: 1.0
 obs_as_global_cond: True
 
+pretrain:
+  # ========== ULIP 训练模式配置 ==========
+  # 三种模式:
+  # 1. "frozen": 完全冻结 ULIP encoder,只训练动作头
+  # 2. "finetune": 微调模式,可以设置 warmup 和学习率比例
+  # 3. "scratch": 从头训练(不加载预训练权重)
+  training_mode: "finetune"  # 可选: "frozen", "finetune", "scratch"
+  
+  # 预训练模型路径
+  pretrained_pointnet_path: "/home/gl/RoboTwin/policy/DP3/3D-Diffusion-Policy/diffusion_policy_3d/pretrained_model/ULIP-2-PointBERT-8k-xyz-pc-slip_vit_b-objaverse-pretrained.pt"
+  
+  # finetune 模式的详细配置(仅在 training_mode="finetune" 时生效)
+  finetune_config:
+    warmup_steps: 500           # warmup 步数
+    unfreeze_step: 500          # 多少步后开始解冻 encoder
+    encoder_lr_ratio: 0.1       # encoder 学习率相对主 LR 的比例
+    gradual_unfreeze: false     # 是否逐层解冻(高级功能)
+
 policy:
   _target_: diffusion_policy_3d.policy.dp3.DP3
   use_point_crop: true
@@ -55,7 +73,13 @@ policy:
   shape_meta: ${shape_meta}
 
   use_pc_color: false
-  pointnet_type: "pointnet"
+  pointnet_type: "ulip_xyz"  # 可选: "ulip_xyz", "ulip_rgbxyz", pointnet
+
+  # 将 pretrain 配置传递给 policy
+  training_mode: ${pretrain.training_mode}
+  pretrained_pointnet_path: ${pretrain.pretrained_pointnet_path}
+  finetune_config: ${pretrain.finetune_config}
+
 
 
   pointcloud_encoder_cfg:
@@ -75,14 +99,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 256
+  batch_size: 4
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 256
+  batch_size: 4
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -106,7 +130,7 @@ training:
   gradient_accumulate_every: 1
   use_ema: True
   rollout_every: 200
-  checkpoint_every: 3000
+  checkpoint_every: 100
   val_every: 50
   sample_every: 20
   max_train_steps: null

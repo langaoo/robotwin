@@ -45,7 +45,10 @@ class DP3(BasePolicy):
         use_pc_color=False,
         pointnet_type="pointnet",
         pointcloud_encoder_cfg=None,
-        # parameters passed to step
+        # 新增: ULIP 训练模式配置
+        training_mode="frozen",
+        pretrained_pointnet_path=None,
+        finetune_config=None,
         **kwargs,
     ):
         super().__init__()
@@ -72,6 +75,9 @@ class DP3(BasePolicy):
             pointcloud_encoder_cfg=pointcloud_encoder_cfg,
             use_pc_color=use_pc_color,
             pointnet_type=pointnet_type,
+            training_mode=training_mode,
+            pretrained_pointnet_path=pretrained_pointnet_path,
+            finetune_config=finetune_config,
         )
 
         # create diffusion model
