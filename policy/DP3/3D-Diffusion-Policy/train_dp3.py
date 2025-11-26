@@ -86,6 +86,19 @@ class TrainDP3Workspace:
             except:  # minkowski engine could not be copied. recreate it
                 self.ema_model = hydra.utils.instantiate(cfg.policy)
 
+        # configure training state
+        self.global_step = 0
+        self.epoch = 0
+
+        # [Finetune Scenario 2] 如果指定了 finetune_checkpoint_path，则加载权重并恢复 epoch
+        if cfg.pretrain.training_mode == "finetune":
+            ckpt_path = cfg.pretrain.finetune_config.get('finetune_checkpoint_path', None)
+            if ckpt_path:
+                cprint(f"[Finetune] Loading checkpoint from {ckpt_path}", "magenta")
+                # Exclude optimizer as we will create a new one for finetuning
+                self.load_checkpoint(path=ckpt_path, exclude_keys=['optimizer'])
+                cprint(f"[Finetune] Resumed at epoch {self.epoch}, step {self.global_step}", "magenta")
+
 
        # 配置 optimizer - 根据训练模式设置不同学习率
         if cfg.pretrain.training_mode == "frozen":
@@ -115,13 +128,35 @@ class TrainDP3Workspace:
 
 
         # configure training state
-        self.global_step = 0
-        self.epoch = 0
+        # self.global_step = 0
+        # self.epoch = 0
 
         # 新增：记录 encoder 是否已解冻（用于 finetune 模式）
         self.encoder_unfrozen = (cfg.pretrain.training_mode != "finetune")
+        
+        # [Finetune] 检查是否需要立即解冻 (如果加载的 checkpoint epoch 已经超过 unfreeze_step)
+        self._maybe_unfreeze_encoder(cfg)
+
         # 验证冻结状态
         self._verify_freeze_status(cfg)
+
+        # 打印当前优化器各参数组配置，便于确认微调阶段的学习率等是否正确
+        self._print_optimizer_info(cfg)
+
+    def _print_optimizer_info(self, cfg):
+        """打印当前 optimizer 配置 (各 param_group 的 lr / weight_decay / name)。"""
+        cprint("\n================ Optimizer Config ================", "cyan")
+        cprint(f"Optimizer class: {type(self.optimizer).__name__}", "yellow")
+        for i, g in enumerate(self.optimizer.param_groups):
+            lr = g.get("lr", None)
+            name = g.get("name", f"group_{i}")
+            wd = g.get("weight_decay", None)
+            num_params = sum(p.numel() for p in g.get("params", []))
+            cprint(
+                f"  - Group {i} ({name}): lr={lr}, weight_decay={wd}, params={num_params}",
+                "green",
+            )
+        cprint("==================================================\n", "cyan")
     
     def _get_frozen_optimizer_params(self):
         """frozen 模式：仅冻结 ULIP backbone，保留 projector 和后续头部可训练"""
@@ -234,17 +269,27 @@ class TrainDP3Workspace:
         cprint("="*60 + "\n", "cyan")
 
     def _maybe_unfreeze_encoder(self, cfg):
-        """在 finetune 模式下，达到指定步数后解冻 encoder"""
+        """在 finetune 模式下，达到指定 **epoch** 后解冻 encoder
+
+        注意：这里改为使用 self.epoch 作为判定条件，而不是 global_step（批次数）。
+        例如：如果配置中 pretrain.finetune_config.unfreeze_step=500，则表示
+        在第 500 个 epoch 结束后（self.epoch >= 500）才解冻 encoder。
+        """
         if cfg.pretrain.training_mode != "finetune":
             return
         
         if self.encoder_unfrozen:
             return
-        
-        unfreeze_step = cfg.pretrain.finetune_config.unfreeze_step
-        
-        if self.global_step >= unfreeze_step:
-            cprint(f"[Finetune] Unfreezing encoder at step {self.global_step}", "green")
+
+        # 将原来的 "unfreeze_step" 解释为 "unfreeze_epoch"
+        target_unfreeze_epoch = cfg.pretrain.finetune_config.unfreeze_step
+
+        # 使用 epoch 作为判定条件，而不是 global_step
+        if self.epoch >= target_unfreeze_epoch:
+            cprint(
+                f"[Finetune] Unfreezing encoder at epoch {self.epoch} (target={target_unfreeze_epoch})",
+                "green",
+            )
             for name, param in self.model.named_parameters():
                 if 'obs_encoder.extractor.backbone' in name:
                     param.requires_grad = True
@@ -257,7 +302,7 @@ class TrainDP3Workspace:
             self.encoder_unfrozen = True
             cprint("[Finetune] Encoder unfrozen, now trainable", "green")
             # 验证解冻成功
-            self._verify_freeze_status(cfg)
+            # self._verify_freeze_status(cfg)
 
     def _get_checkpoint_dir_name(self, cfg):
         """生成 checkpoint 目录名称，包含训练模式信息"""
@@ -500,7 +545,7 @@ class TrainDP3Workspace:
                     val_losses = list()
                     with tqdm.tqdm(
                             val_dataloader,
-                            desc=f"Validation epoch {self.epoch}",
+                            # desc=f"Validation epoch {self.epoch}",
                             leave=False,
                             mininterval=cfg.training.tqdm_interval_sec,
                     ) as tepoch:
@@ -508,7 +553,7 @@ class TrainDP3Workspace:
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                             loss, loss_dict = self.model.compute_loss(batch)
                             val_losses.append(loss)
-                            print(f"epoch {self.epoch}, eval loss: ", float(loss.cpu()))
+                            # print(f"epoch {self.epoch}, eval loss: ", float(loss.cpu()))
                             if (cfg.training.max_val_steps
                                     is not None) and batch_idx >= (cfg.training.max_val_steps - 1):
                                 break

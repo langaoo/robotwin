@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 from termcolor import cprint
 
-
 # 将 ULIP-main 加入搜索路径，方便直接复用官方 PointBERT 编码器
 ULIP_ROOT = Path(__file__).resolve().parents[4] / "ULIP-main"
 if str(ULIP_ROOT) not in sys.path:
@@ -19,7 +18,6 @@ except Exception as exc:  # pragma: no cover - 仅在依赖缺失时触发
     raise ImportError(
         "无法导入 ULIP PointBERT 编码器，请确认 `policy/DP3/ULIP-main` 在路径上并已安装依赖。"
     ) from exc
-
 
 @dataclass
 class ULIPBackboneConfig:
@@ -34,19 +32,16 @@ class ULIPBackboneConfig:
     num_group: int = 512
     encoder_dims: int = 256
 
-
 class _DummyArgs:
     """PointBERT 需要的简单 args 容器，仅使用 evaluate_3d 字段。"""
 
     def __init__(self, evaluate_3d: bool = True) -> None:
         self.evaluate_3d = evaluate_3d
 
-
 def _freeze_module(module: nn.Module) -> None:
     """冻结一个 module 的全部参数。"""
     for param in module.parameters():
         param.requires_grad = False
-
 
 def _build_projector(
     in_dim: int, out_dim: int, final_norm: str = "layernorm"
@@ -61,20 +56,41 @@ def _build_projector(
         raise NotImplementedError(f"final_norm: {final_norm}")
     return nn.Sequential(*layers) if len(layers) > 1 else layers[0]
 
-
 def _clean_state_dict(state_dict: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     """提取 checkpoint 中与 point_encoder 相关的权重。"""
-    cleaned = {}
+    cleaned_with_prefix: Dict[str, torch.Tensor] = {}
+    cleaned_fallback: Dict[str, torch.Tensor] = {}
+    allowed_prefixes = (
+        "cls_token",
+        "cls_pos",
+        "pos_embed",
+        "group_divider",
+        "encoder",
+        "reduce_dim",
+        "blocks",
+        "norm",
+    )
+
     for key, value in state_dict.items():
         if "point_encoder." in key:
             new_key = key.split("point_encoder.", 1)[1]
-        elif key.startswith("module."):
-            new_key = key[len("module.") :]
-        else:
-            new_key = key
-        cleaned[new_key] = value
-    return cleaned
+            cleaned_with_prefix[new_key] = value
+            continue
 
+        plain_key = key[len("module.") :] if key.startswith("module.") else key
+        if any(plain_key.startswith(prefix) for prefix in allowed_prefixes):
+            cleaned_fallback[plain_key] = value
+
+    if cleaned_with_prefix:
+        return cleaned_with_prefix
+    if cleaned_fallback:
+        return cleaned_fallback
+
+    # 最后兜底：只去掉 module. 前缀
+    return {
+        key[len("module.") :] if key.startswith("module.") else key: value
+        for key, value in state_dict.items()
+    }
 
 class _ULIPEncoderBase(nn.Module):
     """封装 ULIP PointBERT 编码器，输出与 DP3 动作头对齐的特征。"""
@@ -183,7 +199,6 @@ class _ULIPEncoderBase(nn.Module):
             self.backbone.eval()
         return self
 
-
 class ULIPEncoderXYZ(_ULIPEncoderBase):
     """仅 xyz 的 ULIP-PointBERT 编码器。"""
 
@@ -198,12 +213,16 @@ class ULIPEncoderXYZ(_ULIPEncoderBase):
         strict_load: bool = False,
         **kwargs: Any,
     ) -> None:
+        xyz_cfg = {"depth": 12}
+        if ulip_cfg is not None:
+            xyz_cfg.update(ulip_cfg)
+
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
             training_mode=training_mode,
             pretrained_model_path=pretrained_model_path,
-            ulip_cfg=ulip_cfg,
+            ulip_cfg=xyz_cfg,
             final_norm=final_norm,
             strict_load=strict_load,
             colored=False,
