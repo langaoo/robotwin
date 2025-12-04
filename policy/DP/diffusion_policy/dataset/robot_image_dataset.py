@@ -52,8 +52,8 @@ class RobotImageDataset(BaseImageDataset):
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
             # keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
-            keys=['head_camera', 'front_camera', 'state', 'action'],
-            # keys=['head_camera', 'state', 'action'],
+            # keys=['head_camera', 'front_camera', 'state', 'action'],
+            keys=['head_camera', 'state', 'action'],
         )
 
         # 加载task_config中的增强参数
@@ -351,7 +351,7 @@ class RobotImageDataset(BaseImageDataset):
         os.makedirs(save_dir, exist_ok=True)
         
         # cam_names = ['head_cam', 'front_cam', 'left_cam', 'right_cam']
-        cam_names = ['head_cam','front_cam']
+        cam_names = ['head_cam']
         
         # 只保存第一个样本的第一帧
         sample_idx = 0
@@ -521,7 +521,7 @@ class RobotImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         normalizer["head_cam"] = get_image_range_normalizer()
-        normalizer["front_cam"] = get_image_range_normalizer()
+        # normalizer["front_cam"] = get_image_range_normalizer()
         # normalizer["left_cam"] = get_image_range_normalizer()
         # normalizer["right_cam"] = get_image_range_normalizer()
         return normalizer
@@ -533,7 +533,7 @@ class RobotImageDataset(BaseImageDataset):
         agent_pos = sample["state"].astype(np.float32)  # (agent_posx2, block_posex3)
         # 原始数据格式：zarr中保存的是(T, C, H, W)格式
         head_cam = sample["head_camera"].astype(np.float32)
-        front_cam = sample['front_camera'].astype(np.float32)
+        # front_cam = sample['front_camera'].astype(np.float32)
         # left_cam = sample['left_camera'].astype(np.float32)
         # right_cam = sample['right_camera'].astype(np.float32)
 
@@ -542,7 +542,7 @@ class RobotImageDataset(BaseImageDataset):
         data = {
             "obs": {
                 "head_cam": head_cam,  # T, 3, H, W
-                'front_cam': front_cam, # T, 3, H, W
+                # 'front_cam': front_cam, # T, 3, H, W
                 # 'left_cam': left_cam, # T, 3, H, W
                 # 'right_cam': right_cam, # T, 3, H, W
                 "agent_pos": agent_pos,  # T, D
@@ -769,7 +769,7 @@ class RobotImageDataset(BaseImageDataset):
             batch_data = {
                 "obs": {
                     "head_cam": self.buffers["head_camera"].astype(np.float32),  # (B, T, C, H, W)
-                    "front_cam": self.buffers["front_camera"].astype(np.float32),
+                    # "front_cam": self.buffers["front_camera"].astype(np.float32),
                     # "left_cam": self.buffers["left_camera"].astype(np.float32),
                     # "right_cam": self.buffers["right_camera"].astype(np.float32),
                     "agent_pos": self.buffers["state"].astype(np.float32),  # (B, T, D)
@@ -788,7 +788,7 @@ class RobotImageDataset(BaseImageDataset):
     def postprocess(self, samples, device):
         batch_size = samples["obs"]["head_cam"].shape[0]
         # 动态构建摄像头列表（现在只有 head_cam）
-        cam_keys = ["head_cam", "front_cam"]  # 可扩展为 ["head_cam", "front_cam", ...]
+        cam_keys = ["head_cam"]  # 可扩展为 ["head_cam", "front_cam", ...]
         cam_list = [samples["obs"][key] for key in cam_keys]
         num_cams = len(cam_list)
         
@@ -918,7 +918,7 @@ class RobotImageDataset(BaseImageDataset):
         return {
             "obs": {
                 "head_cam": all_cams_aug[0].to(device, non_blocking=True),
-                "front_cam": all_cams_aug[1].to(device, non_blocking=True),
+                # "front_cam": all_cams_aug[1].to(device, non_blocking=True),
                 # "left_cam": all_cams_aug[2].to(device, non_blocking=True),
                 # "right_cam": all_cams_aug[3].to(device, non_blocking=True),
                 "agent_pos": samples["obs"]["agent_pos"].to(device, non_blocking=True),

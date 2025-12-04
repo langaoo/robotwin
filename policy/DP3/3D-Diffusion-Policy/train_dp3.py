@@ -641,7 +641,7 @@ class TrainDP3Workspace:
                 os.path.join(
                     DP3_ROOT,
                     # f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}/{usr_args['checkpoint_num']}.ckpt"
-                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}_{cfg.policy.pointnet_type}_scratch/{usr_args['checkpoint_num']}.ckpt"
+                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}_{cfg.policy.pointnet_type}_{cfg.pretrain.training_mode}/{usr_args['checkpoint_num']}.ckpt"
 
                 ))
         else:
@@ -649,7 +649,7 @@ class TrainDP3Workspace:
                 os.path.join(
                     DP3_ROOT,
                     # f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_w_rgb_{usr_args['seed']}/{usr_args['checkpoint_num']}.ckpt"
-                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}_rgb_{cfg.policy.pointnet_type}_frozen/{usr_args['checkpoint_num']}.ckpt"
+                    f"./checkpoints/{usr_args['task_name']}-{usr_args['ckpt_setting']}-{usr_args['expert_data_num']}_{usr_args['seed']}_rgb_{cfg.policy.pointnet_type}_{cfg.pretrain.training_mode}/{usr_args['checkpoint_num']}.ckpt"
 
                 ))
         assert ckpt_file.is_file(), f"ckpt file doesn't exist, {ckpt_file}"

@@ -32,8 +32,8 @@ pretrain:
     unfreeze_step: 500          # 多少步后开始解冻 encoder
     encoder_lr_ratio: 0.1       # encoder 学习率相对主 LR 的比例
     gradual_unfreeze: false     # 是否逐层解冻(高级功能)
-    # finetune_checkpoint_path: "/home/gl/RoboTwin/policy/DP3/checkpoints/move_can_pot-demo_clean-50_0_ulip_xyz_frozen/500.ckpt" # 如果提供，则从该 checkpoint 加载权重并继续微调 (Scenario 2)
-    finetune_checkpoint_path: null
+    finetune_checkpoint_path: "/home/gl/RoboTwin/policy/DP3/checkpoints/move_can_pot-demo_clean-50_0_ulip_xyz_frozen/500.ckpt" # 如果提供，则从该 checkpoint 加载权重并继续微调 (Scenario 2)
+    # finetune_checkpoint_path: null
 
 policy:
   _target_: diffusion_policy_3d.policy.dp3.DP3
@@ -128,7 +128,7 @@ training:
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 1000
+  num_epochs: 500
   # num_epochs: 500  # 从 finetune 配置读取
   gradient_accumulate_every: 1
   use_ema: True
