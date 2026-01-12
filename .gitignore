@@ -32,3 +32,14 @@ envs/curobo/*
 *.png
 *.jpg
 *.gif
+policy/DP3/ULIP-main
+policy/DP3/rgbpc_dataset
+*.ply
+*.jsonl
+PC/
+*.pt
+policy/DP3/KNN_CUDA_tmp/
+policy/DP3/knn_cuda_tmp/
+policy/DP3/pointnet2_tmp/
+policy/DP3/data/*.zarr/
+external_rgb_dataset

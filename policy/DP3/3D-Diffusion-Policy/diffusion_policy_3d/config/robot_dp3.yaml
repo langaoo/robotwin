@@ -21,7 +21,7 @@ pretrain:
   # 1. "frozen": 完全冻结 ULIP encoder,只训练动作头
   # 2. "finetune": 微调模式,可以设置 warmup 和学习率比例
   # 3. "scratch": 从头训练(不加载预训练权重)
-  training_mode: "frozen"  # 可选: "frozen", "finetune", "scratch"
+  training_mode: "scratch"  # 可选: "frozen", "finetune", "scratch"
   
   # 预训练模型路径
   pretrained_pointnet_path: "/home/gl/RoboTwin/policy/DP3/3D-Diffusion-Policy/diffusion_policy_3d/pretrained_model/ULIP-2-PointBERT-8k-xyz-pc-slip_vit_b-objaverse-pretrained.pt"
@@ -74,8 +74,8 @@ policy:
   obs_as_global_cond: true
   shape_meta: ${shape_meta}
 
-  use_pc_color: false
-  pointnet_type: "ulip_xyz"  # 可选: "ulip_xyz", "ulip_rgbxyz", pointnet
+  use_pc_color: true
+  pointnet_type: "pointnet"  # 可选: "ulip_xyz", "ulip_rgbxyz", pointnet
 
   # 将 pretrain 配置传递给 policy
   training_mode: ${pretrain.training_mode}
@@ -85,7 +85,7 @@ policy:
 
 
   pointcloud_encoder_cfg:
-    in_channels: 3
+    in_channels: 6
     out_channels: ${policy.encoder_output_dim}
     use_layernorm: true
     final_norm: layernorm # layernorm, none
@@ -101,14 +101,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 32
+  batch_size: 64
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 32
+  batch_size: 64
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -128,12 +128,12 @@ training:
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 500
+  num_epochs: 3000
   # num_epochs: 500  # 从 finetune 配置读取
   gradient_accumulate_every: 1
   use_ema: True
   rollout_every: 200
-  checkpoint_every: 100
+  checkpoint_every: 1500
   val_every: 50
   sample_every: 20
   max_train_steps: null

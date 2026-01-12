@@ -72,6 +72,12 @@ def main(usr_args):
     save_dir = None
     video_save_dir = None
     video_size = None
+    
+    # 🔧 仅在明确指定 sampling_method 时才获取该参数
+    # 如果没有传入，则表示使用原生 Sapien 点云流程
+    sampling_method = usr_args.get("sampling_method", None)
+    if sampling_method is not None:
+        print(f"\033[36m[INFO] Point cloud sampling method specified: {sampling_method}\033[0m")
 
     get_model = eval_function_decorator(policy_name, "get_model")
 
@@ -81,6 +87,21 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    
+    # 🔧 【附加功能】仅当 sampling_method 参数存在时，才启用 RGBD 转点云流程
+    # 如果没有传入 sampling_method，则完全走原生 Sapien 点云流程
+    if "data_type" not in args:
+        args["data_type"] = {}
+    
+    # 只有明确指定 sampling_method 时，才设置 RGBD 转点云标志
+    if "sampling_method" in usr_args:
+        args["data_type"]["use_rgbd_pointcloud"] = True
+        args["data_type"]["use_fps_sampling"] = (sampling_method.lower() == "fps")
+        print(f"\033[36m[INFO] Using RGBD pointcloud with sampling method: {sampling_method}\033[0m")
+    else:
+        # 默认情况：不启用 RGBD 流程，走原生 Sapien 点云
+        args["data_type"]["use_rgbd_pointcloud"] = False
+        print(f"\033[36m[INFO] Using native Sapien pointcloud (original pipeline)\033[0m")
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -158,11 +179,16 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
+    # 🔧 修复: 如果要使用训练集seed，从usr_args读取，否则使用默认值
+    # 训练时seed范围通常是 [0, num_episodes-1]
+    # st_seed = usr_args.get("eval_start_seed", 3)  # 可通过 --eval_start_seed 0 指定
     start_seed = st_seed  # preserve start seed for logging
     # st_seed = 0
     suc_nums = []
-    test_num = 100
+    test_num = usr_args.get("eval_test_num", 100)  # 可通过 --eval_test_num 20 指定
     topk = 1
+    
+    print(f"\033[93m[INFO] Eval starting from seed {st_seed}, testing {test_num} episodes\033[0m")
 
     model = get_model(usr_args)
     st_seed, suc_num = eval_policy(task_name,
@@ -232,8 +258,11 @@ def eval_policy(task_name,
     clear_cache_freq = args["clear_cache_freq"]
 
     args["eval_mode"] = True
+    
+    print(f"\033[93m[DEBUG] Starting eval loop with st_seed={st_seed}, test_num={test_num}\033[0m")
 
     while succ_seed < test_num:
+        print(f"\033[90m[DEBUG] Loop iteration: succ_seed={succ_seed}/{test_num}, now_seed={now_seed}, now_id={now_id}\033[0m")
         render_freq = args["render_freq"]
         args["render_freq"] = 0
 

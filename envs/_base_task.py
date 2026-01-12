@@ -492,9 +492,20 @@ class Base_Task(gym.Env):
             pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
             pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
             pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
-        # pointcloud
+        # pointcloud - 原生Sapien点云获取
         if self.data_type.get("pointcloud", False):
-            pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
+            # 🔧 新增：仅当明确指定 use_rgbd_pointcloud=True 时才走RGBD转点云流程
+            # 默认情况下（数据收集等）完全走原生 get_pcd() 流程，保持源码逻辑不变
+            if self.data_type.get("use_rgbd_pointcloud", False):
+                # 附加功能：RGBD转点云（仅在训练/推理时手动启用）
+                use_fps = self.data_type.get("use_fps_sampling", False)
+                pkl_dic["pointcloud"] = self.cameras.get_pcd_from_rgbd(
+                    self.data_type.get("conbine", False),
+                    use_fps=use_fps
+                )
+            else:
+                # 原生流程：使用Sapien直接获取的点云（数据收集必须走这里）
+                pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
