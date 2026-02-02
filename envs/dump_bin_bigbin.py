@@ -145,7 +145,7 @@ class dump_bin_bigbin(Base_Task):
         for i in range(3):
             self.move(self.pour_actions)
         # Delay for 6 seconds
-        self.delay(6)
+        self.delay(20)
 
         self.info["info"] = {"{A}": f"063_tabletrashbin/base{self.deskbin_id}"}
         return self.info

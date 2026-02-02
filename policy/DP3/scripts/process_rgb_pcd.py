@@ -197,8 +197,8 @@ def main():
     parser.add_argument("task_name", type=str, help="任务名称（如beat_block_hammer）")
     parser.add_argument("task_config", type=str, help="任务配置（如demo_randomized）")
     parser.add_argument("expert_data_num", type=int, help="需要处理的episode数量")
-    parser.add_argument("--output_root", type=str, default="./dataset", 
-                        help="输出根目录（默认：./dataset）")
+    parser.add_argument("--output_root", type=str, default="/home/gl/RoboTwin/policy/DP2DP3/features_model",
+                        help="输出根目录（默认：/home/gl/RoboTwin/policy/DP2DP3/features_model）")
     parser.add_argument("--use_dense", action="store_true",
                         help="使用depth+RGB生成密集点云")
     parser.add_argument("--dense_camera", type=str, default="all",
@@ -246,9 +246,9 @@ def main():
                     print(f"警告：相机{cam_name}不存在，跳过")
                     continue
                 
-                # 每个相机一个独立的目录
-                pcd_root = os.path.join(base_root, "PC", f"{task_subdir}_{cam_name}")
-                rgb_root = os.path.join(base_root, "RGB", f"{task_subdir}_{cam_name}")
+                # 每个相机一个独立的目录 (保存到 features_model/pc_dataset/PC 和 rgb_dataset/RGB)
+                pcd_root = os.path.join(base_root, "pc_dataset", "PC", f"{task_subdir}_{cam_name}")
+                rgb_root = os.path.join(base_root, "rgb_dataset", "RGB", f"{task_subdir}_{cam_name}")
                 os.makedirs(pcd_root, exist_ok=True)
                 os.makedirs(rgb_root, exist_ok=True)
                 
@@ -275,9 +275,13 @@ def main():
                         print(f"    处理进度: {step}/{n_frames}")
 
                     # 1. 解码图像并转换为RGB
-                    img_array = np.frombuffer(rgb_bytes_list[step], np.uint8)
-                    img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)  # 关键修复：BGR转RGB
+                    # 注意: HDF5中JPEG数据实际上以BGR通道编码，使用PIL解码后反转通道更可靠
+                    from PIL import Image
+                    import io
+                    img_pil = Image.open(io.BytesIO(rgb_bytes_list[step]))
+                    img_array = np.array(img_pil)
+                    # 通道反转: BGR -> RGB
+                    img_rgb = img_array[:, :, ::-1]
                     
                     # 2. 生成密集点云 (使用OpenGL坐标系)
                     dense_pc = depth_to_pointcloud(
@@ -300,14 +304,16 @@ def main():
                     )
                     
                     # 3. 保存 RGB 图像 (修正颜色通道)
-                    # cv2.imwrite 期望 BGR 格式，所以直接保存 img_bgr 即可 (img_bgr是直接解码得到的)
+                    # 🔧 修复: HDF5中是BGR，已转换为RGB，cv2.imwrite保存BGR，所以需要再转回BGR
+                    # 但更简单的是用PIL保存RGB格式
+                    from PIL import Image
                     png_path = os.path.join(cam_rgb_dir, f"step_{step:04d}.png")
-                    cv2.imwrite(png_path, img_bgr)
+                    Image.fromarray(img_rgb).save(png_path)  # 直接保存RGB格式
                     
         elif pointcloud_all is not None:
             # 使用原始稀疏点云
-            pcd_root = os.path.join(base_root, "PC", task_subdir)
-            rgb_root = os.path.join(base_root, "RGB", task_subdir)
+            pcd_root = os.path.join(base_root, "pc_dataset", "PC", task_subdir)
+            rgb_root = os.path.join(base_root, "rgb_dataset", "RGB", task_subdir)
             os.makedirs(pcd_root, exist_ok=True)
             os.makedirs(rgb_root, exist_ok=True)
             
@@ -320,16 +326,19 @@ def main():
             
             # 保存RGB图像（修正颜色通道）
             if rgb_dict:
+                from PIL import Image
+                import io
                 for cam_name, rgb_bytes_list in rgb_dict.items():
                     cam_rgb_dir = os.path.join(rgb_root, f"episode_{ep}", cam_name)
                     os.makedirs(cam_rgb_dir, exist_ok=True)
                     for step in range(len(rgb_bytes_list)):
-                        img_array = np.frombuffer(rgb_bytes_list[step], np.uint8)
-                        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                        if img is not None:
-                            # img decoded via cv2.imdecode is BGR. cv2.imwrite expects BGR.
-                            png_path = os.path.join(cam_rgb_dir, f"step_{step:04d}.png")
-                            cv2.imwrite(png_path, img)
+                        # 🔧 修复: 使用PIL解码JPEG，然后通道反转
+                        # JPEG编码时存的是BGR顺序，PIL解码为RGB后需要反转通道
+                        img_pil = Image.open(io.BytesIO(rgb_bytes_list[step]))
+                        img_array = np.array(img_pil)
+                        img_rgb = img_array[:, :, ::-1]  # 通道反转: BGR -> RGB
+                        png_path = os.path.join(cam_rgb_dir, f"step_{step:04d}.png")
+                        Image.fromarray(img_rgb).save(png_path)
 
     print(f"所有数据处理完成，保存至：{base_root}")
 

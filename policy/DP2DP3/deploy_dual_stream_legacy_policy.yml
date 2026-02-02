@@ -1,0 +1,39 @@
+# DP2DP3 Dual-Stream Legacy Policy Configuration
+# 与 deploy_policy.yml 保持一致，仅用于 legacy dual-stream 推理（无 token_gate）
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_4models
+checkpoint_num: best
+expert_data_num: null
+use_rgb: true
+
+model:
+  encoder:
+    fuse_dim: 1280
+    fusion: weighted
+    freeze: true
+    dummy_mode: none
+
+  head:
+    horizon: 8
+    n_obs_steps: 2
+    num_inference_steps: 16
+    action_dim: 14
+
+features:
+  preextracted: false
+  models:
+    - name: croco
+      dim: 1024
+    - name: vggt
+      dim: 2048
+    - name: dinov3
+      dim: 768
+    - name: da3
+      dim: 2048

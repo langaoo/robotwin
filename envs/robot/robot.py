@@ -29,6 +29,11 @@ class Robot:
 
         self.left_js = None
         self.right_js = None
+        self.left_planner = None
+        self.right_planner = None
+        self.left_conn = None
+        self.right_conn = None
+        self.communication_flag = False
 
         left_embodiment_args = kwargs["left_embodiment_config"]
         right_embodiment_args = kwargs["right_embodiment_config"]
@@ -322,9 +327,19 @@ class Robot:
 
     def update_world_pcd(self, world_pcd):
         try:
-            self.left_planner.update_point_cloud(world_pcd, resolution=0.02)
-            self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
-        except:
+            if self.communication_flag:
+                if self.left_conn is not None:
+                    self.left_conn.send({"cmd": "update_point_cloud", "pcd": world_pcd, "resolution": 0.02})
+                    _ = self.left_conn.recv()
+                if self.right_conn is not None:
+                    self.right_conn.send({"cmd": "update_point_cloud", "pcd": world_pcd, "resolution": 0.02})
+                    _ = self.right_conn.recv()
+            else:
+                if self.left_planner is not None:
+                    self.left_planner.update_point_cloud(world_pcd, resolution=0.02)
+                if self.right_planner is not None:
+                    self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
+        except Exception:
             print("Update world pointcloud wrong!")
 
     def _trans_from_gripper_to_endlink(self, target_pose, arm_tag=None):

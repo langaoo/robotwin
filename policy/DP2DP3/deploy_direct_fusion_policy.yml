@@ -1,0 +1,43 @@
+# DP2DP3 Direct Fusion Policy Configuration for RoBoTwin
+# 用于直接融合训练模型的推理配置（无对齐模块）
+
+# 任务配置（由 eval_direct_fusion.sh 传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_direct_fusion
+checkpoint_num: best
+expert_data_num: null
+use_rgb: true
+
+# 模型架构参数
+model:
+  # 融合配置（无对齐编码器）
+  fusion:
+    type: weighted              # 融合方式: weighted, concat, mean
+    out_dim: 1280               # 融合后维度
+  
+  # Diffusion Head 配置
+  head:
+    horizon: 4                  # 预测未来 4 步
+    n_obs_steps: 4              # 观测 4 帧
+    num_inference_steps: 100    # 扩散推理步数
+    action_dim: 14              # 动作维度（双臂 + gripper）
+
+# 特征提取配置
+features:
+  # 4 个模型的配置
+  models:
+    - name: croco
+      dim: 1024
+    - name: vggt
+      dim: 2048
+    - name: dinov3
+      dim: 768
+    - name: da3
+      dim: 2048

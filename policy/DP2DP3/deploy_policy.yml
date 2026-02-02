@@ -1,0 +1,48 @@
+# DP2DP3 Policy Configuration for RoBoTwin
+# 基本实验配置（与 DP/DP3 保持一致）
+
+# 任务配置（由 eval.sh 传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# DP2DP3 特定参数
+config_name: dp2dp3_4models  # 配置名称
+checkpoint_num: best          # checkpoint 编号（'best' 或具体数字）
+expert_data_num: null         # 专家数据数量
+use_rgb: true                 # DP2DP3 必须使用 RGB
+
+# 模型架构参数
+model:
+  # 对齐编码器配置
+  encoder:
+    fuse_dim: 1280              # 融合维度
+    fusion: weighted            # 融合方式: weighted 或 moe
+    freeze: true                # 是否冻结编码器
+    dummy_mode: none            # 对齐绕过模式: none | pre_proj | slice_mean
+  
+  # Diffusion Head 配置
+  head:
+    horizon: 8                  # 预测未来 8 步
+    n_obs_steps: 2              # 观测 2 帧
+    num_inference_steps: 16     # 扩散推理步数
+    action_dim: 14              # 动作维度（双臂 + gripper）
+
+# 特征提取配置
+features:
+  # RGB 特征提取路径（如果使用预提取特征）
+  preextracted: false           # 是否使用预提取特征
+  
+  # 4 个模型的配置
+  models:
+    - name: croco
+      dim: 1024
+    - name: vggt
+      dim: 2048
+    - name: dinov3
+      dim: 768
+    - name: da3
+      dim: 2048

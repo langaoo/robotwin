@@ -79,7 +79,12 @@ def main(usr_args):
     if sampling_method is not None:
         print(f"\033[36m[INFO] Point cloud sampling method specified: {sampling_method}\033[0m")
 
-    get_model = eval_function_decorator(policy_name, "get_model")
+    # ✅ 检查是否指定了deploy_module (用于单模型等特殊部署)
+    deploy_module = usr_args.get("deploy_module", policy_name)
+    if deploy_module != policy_name:
+        print(f"\033[36m[INFO] Using custom deploy module: {deploy_module}\033[0m")
+    
+    get_model = eval_function_decorator(deploy_module, "get_model")
 
     with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
