@@ -1,0 +1,34 @@
+# DP2DP3 Policy - token_full + DP-Aligned Proprio (n_obs_steps=3)
+#
+# 训练脚本: train_offline_head_dp_aligned.py
+# 训练配置: train_offline_dual_stream_tokens_full_dp_aligned_proprio.yaml
+# Policy 类: DPAlignedDualStreamPolicy (agent_pos 直接 concat + token cross-attn)
+# n_obs_steps=3, horizon=8, 完全对齐原版 DP
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_4models
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+encoder:
+  checkpoint: /home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_ws1_tokens_full/ckpt_final.pt
+  freeze: true
+  dummy_mode: none
+
+policy:
+  type: OfficialDP
+  num_inference_steps: 100
+  use_tokens: true
+  token_gate_init: -4.0
+  token_dropout: 0.1
+  ctx_dropout: 0.1
+  # DP-Aligned proprio: checkpoint 中已记录 policy_class=DPAlignedDualStreamPolicy
+  use_proprio: true
+  proprio_dim: 14

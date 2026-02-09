@@ -1,4 +1,5 @@
 import sapien.core as sapien
+from sapien.render import clear_cache as sapien_clear_cache
 import numpy as np
 import pdb
 from PIL import Image, ImageColor
@@ -341,12 +342,25 @@ class Camera:
 
     def update_picture(self):
         # camera
+        def _safe_take(cam):
+            try:
+                cam.take_picture()
+            except RuntimeError as e:
+                if "cannot create buffer" in str(e).lower():
+                    try:
+                        sapien_clear_cache()
+                    except Exception:
+                        pass
+                    cam.take_picture()
+                else:
+                    raise
+
         if self.collect_wrist_camera:
-            self.left_camera.take_picture()
-            self.right_camera.take_picture()
+            _safe_take(self.left_camera)
+            _safe_take(self.right_camera)
 
         for camera in self.static_camera_list:
-            camera.take_picture()
+            _safe_take(camera)
 
         # ================================= sensor camera =================================
         # self.head_sensor.take_picture()

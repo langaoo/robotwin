@@ -89,6 +89,26 @@ def main(usr_args):
     with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
+    # 可选：允许通过命令行 overrides 覆盖 task_config 里的 eval_video_log（默认不覆盖，保持原行为）
+    def _as_bool(x):
+        if isinstance(x, bool):
+            return x
+        if isinstance(x, (int, float)):
+            return bool(int(x))
+        s = str(x).strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off", "none", "null"):
+            return False
+        return bool(x)
+
+    if "eval_video_log" in usr_args:
+        try:
+            args["eval_video_log"] = _as_bool(usr_args["eval_video_log"])
+            print(f"\033[36m[INFO] Override eval_video_log -> {args['eval_video_log']}\033[0m")
+        except Exception:
+            pass
+
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
@@ -184,9 +204,13 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
-    # 🔧 修复: 如果要使用训练集seed，从usr_args读取，否则使用默认值
-    # 训练时seed范围通常是 [0, num_episodes-1]
-    # st_seed = usr_args.get("eval_start_seed", 3)  # 可通过 --eval_start_seed 0 指定
+    # ✅ 可选：支持从指定 seed 开始评估（用于断点续跑）
+    # 用法：--eval_start_seed 100187
+    try:
+        if "eval_start_seed" in usr_args:
+            st_seed = int(usr_args.get("eval_start_seed"))
+    except Exception:
+        pass
     start_seed = st_seed  # preserve start seed for logging
     # st_seed = 0
     suc_nums = []
@@ -195,12 +219,19 @@ def main(usr_args):
     
     print(f"\033[93m[INFO] Eval starting from seed {st_seed}, testing {test_num} episodes\033[0m")
 
+    # ✅ 可选：支持指定 episode 起始编号（用于 action_log 续写不重号）
+    try:
+        start_ep_id = int(usr_args.get("eval_start_id", 0))
+    except Exception:
+        start_ep_id = 0
+
     model = get_model(usr_args)
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
                                    args,
                                    model,
                                    st_seed,
+                                   start_id=start_ep_id,
                                    test_num=test_num,
                                    video_size=video_size,
                                    instruction_type=instruction_type)
@@ -240,6 +271,7 @@ def eval_policy(task_name,
                 args,
                 model,
                 st_seed,
+                start_id=0,
                 test_num=100,
                 video_size=None,
                 instruction_type=None):
@@ -250,7 +282,11 @@ def eval_policy(task_name,
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
 
-    now_id = 0
+    try:
+        start_id = int(start_id)
+    except Exception:
+        start_id = 0
+    now_id = start_id
     succ_seed = 0
     suc_test_seed_list = []
 
@@ -266,8 +302,16 @@ def eval_policy(task_name,
     
     print(f"\033[93m[DEBUG] Starting eval loop with st_seed={st_seed}, test_num={test_num}\033[0m")
 
+    # ✅ 如果需要续写 action_log 的 episode 编号，则提前设置 model._episode_id
+    # 这样第一次 reset 后 episode 会从 start_id 开始
+    try:
+        if hasattr(model, "_episode_id"):
+            model._episode_id = int(start_id) - 1
+    except Exception:
+        pass
+
     while succ_seed < test_num:
-        print(f"\033[90m[DEBUG] Loop iteration: succ_seed={succ_seed}/{test_num}, now_seed={now_seed}, now_id={now_id}\033[0m")
+        # print(f"\033[90m[DEBUG] Loop iteration: succ_seed={succ_seed}/{test_num}, now_seed={now_seed}, now_id={now_id}\033[0m")
         render_freq = args["render_freq"]
         args["render_freq"] = 0
 

@@ -1,0 +1,32 @@
+# DP2DP3 Single Model + Proprio Policy Configuration for RoBoTwin
+# 用于单模型 + 本体感知训练模型的推理配置
+
+# ✅ 指定deploy模块
+deploy_module: DP2DP3.deploy_single_model_policy
+
+# 任务配置（由 eval 脚本传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_single_model_proprio
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+model_name: dinov3
+
+# 模型架构参数
+model:
+  models:
+    dinov3:
+      dim: 768
+  
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14

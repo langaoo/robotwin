@@ -1,0 +1,36 @@
+# DP2DP3 Policy Configuration for RoBoTwin (with proprio)
+# 保持原有纯视觉架构不变，仅在 Head 前融合 agent_pos
+
+# 任务配置（由 eval.sh 传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# DP2DP3 特定参数
+config_name: dp2dp3_4models
+checkpoint_num: best
+expert_data_num: null
+use_rgb: true
+
+# 对齐编码器（必须显式写出，避免默认路径）
+encoder:
+  checkpoint: /home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_ws1_tokens_full/ckpt_final.pt
+  freeze: true
+  dummy_mode: none
+
+# Policy Head（可选 proprio）
+policy:
+  type: OfficialDP
+  num_inference_steps: 100
+  use_tokens: true
+  token_gate_init: -4.0
+  token_dropout: 0.1
+  ctx_dropout: 0.1
+  # 本体感知开关（默认关闭；此文件示例为开启）
+  use_proprio: true
+  proprio_dim: 14
+  proprio_mode: concat
+  proprio_hidden: 256

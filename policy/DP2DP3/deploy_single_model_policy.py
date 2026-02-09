@@ -47,7 +47,7 @@ class SingleModelDPPolicy(nn.Module):
         obs_dim: int,
         action_dim: int = 14,
         horizon: int = 8,
-        n_obs_steps: int = 2,
+        n_obs_steps: int = 3,
         num_inference_steps: int = 100,
     ):
         super().__init__()
@@ -57,6 +57,7 @@ class SingleModelDPPolicy(nn.Module):
         self.horizon = horizon
         self.n_obs_steps = n_obs_steps
         self.num_inference_steps = num_inference_steps
+        self.use_proprio = False
         
         # ✅ LinearNormalizer自动管理归一化
         self.normalizer = LinearNormalizer()
@@ -89,7 +90,7 @@ class SingleModelDPPolicy(nn.Module):
             prediction_type='epsilon'
         )
     
-    def forward(self, obs):
+    def forward(self, obs, agent_pos=None):
         """
         推理采样
         obs: [B, To, D]
@@ -119,6 +120,90 @@ class SingleModelDPPolicy(nn.Module):
         # ✅ 自动反归一化
         action = self.normalizer['action'].unnormalize(action)
         
+        return action
+
+
+class SingleModelProprioPolicy(nn.Module):
+    """单模型 + proprio + Diffusion Policy（DP-aligned: agent_pos 直接拼接）"""
+    
+    def __init__(
+        self,
+        vis_dim: int,
+        proprio_dim: int = 14,
+        action_dim: int = 14,
+        horizon: int = 8,
+        n_obs_steps: int = 3,
+        num_inference_steps: int = 100,
+    ):
+        super().__init__()
+        
+        self.vis_dim = vis_dim
+        self.proprio_dim = proprio_dim
+        self.obs_dim = vis_dim  # 兼容旧接口
+        self.action_dim = action_dim
+        self.horizon = horizon
+        self.n_obs_steps = n_obs_steps
+        self.num_inference_steps = num_inference_steps
+        self.use_proprio = True
+        
+        self.normalizer = LinearNormalizer()
+        
+        per_step_dim = vis_dim + proprio_dim
+        obs_encoder_dim = per_step_dim * n_obs_steps
+        
+        self.obs_encoder = nn.Sequential(
+            nn.Linear(obs_encoder_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+        )
+        
+        self.noise_pred_net = ConditionalUnet1D(
+            input_dim=action_dim,
+            global_cond_dim=256,
+            diffusion_step_embed_dim=128,
+            down_dims=[256, 512, 1024],
+            kernel_size=5,
+            n_groups=8,
+            cond_predict_scale=True,
+        )
+        
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=100,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            prediction_type='epsilon'
+        )
+    
+    def forward(self, vis_feat, agent_pos=None):
+        """
+        推理采样
+        vis_feat: [B, To, vis_dim]
+        agent_pos: [B, To, proprio_dim]
+        """
+        B = vis_feat.shape[0]
+        device = vis_feat.device
+        
+        if agent_pos is not None:
+            nagent_pos = self.normalizer['agent_pos'].normalize(agent_pos)
+            obs_combined = torch.cat([vis_feat, nagent_pos], dim=-1)
+        else:
+            zeros = torch.zeros(B, vis_feat.shape[1], self.proprio_dim, device=device)
+            obs_combined = torch.cat([vis_feat, zeros], dim=-1)
+        
+        obs_flat = obs_combined.reshape(B, -1)
+        obs_cond = self.obs_encoder(obs_flat)
+        
+        action = torch.randn((B, self.horizon, self.action_dim), device=device)
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+        
+        for t in self.noise_scheduler.timesteps:
+            noise_pred = self.noise_pred_net(
+                action, t.unsqueeze(0).expand(B).to(device), global_cond=obs_cond
+            )
+            action = self.noise_scheduler.step(noise_pred, t, action).prev_sample
+        
+        action = self.normalizer['action'].unnormalize(action)
         return action
 
 
@@ -154,10 +239,15 @@ class SingleModelInference:
         self.checkpoint_num = usr_args.get('checkpoint_num', 'best')
         self.model_name = usr_args.get('model_name', 'dinov3')  # 默认dinov3
         
-        # ✅ Checkpoint路径 (格式: lift_pot-demo_clean-50-dinov3)
+        # ✅ Checkpoint路径 (格式: lift_pot-demo_clean-50-dinov3 或 lift_pot-demo_clean-50-dinov3-proprio)
         ckpt_dir_name = f"{self.task_name}-{self.ckpt_setting}-{self.expert_data_num}-{self.model_name}"
+        ckpt_dir_name_proprio = f"{ckpt_dir_name}-proprio"
         
         possible_dirs = [
+            # proprio版优先搜索
+            self.policy_dir / "checkpoints_single_model_ws1" / ckpt_dir_name_proprio,
+            self.features_model_dir / "checkpoints_single_model_ws1" / ckpt_dir_name_proprio,
+            # 原始版
             self.policy_dir / "checkpoints_single_model_ws1" / ckpt_dir_name,
             self.features_model_dir / "checkpoints_single_model_ws1" / ckpt_dir_name,
         ]
@@ -204,10 +294,18 @@ class SingleModelInference:
         # 从checkpoint恢复配置
         config = ckpt.get('config', {})
         self.horizon = config.get('data', {}).get('horizon', 8)
-        self.n_obs_steps = config.get('data', {}).get('n_obs_steps', 2)
+        self.n_obs_steps = config.get('data', {}).get('n_obs_steps', 3)
         self.model_name = config.get('model', {}).get('name', 'dinov3')
         
+        # ✅ 检测是否是 proprio 版 checkpoint
+        policy_class = ckpt.get('policy_class', '')
+        self.use_proprio = (policy_class == 'SingleModelProprioPolicy')
+        self.proprio_dim = int(ckpt.get('proprio_dim', 14)) if self.use_proprio else 0
+        vis_dim = int(ckpt.get('vis_dim', 0))
+        
         print(f"[SingleModel] Config: horizon={self.horizon}, n_obs_steps={self.n_obs_steps}")
+        print(f"[SingleModel] Policy class: {policy_class or 'SingleModelDPPolicy'}")
+        print(f"[SingleModel] use_proprio: {self.use_proprio}")
         
         # 1. ✅ 加载单个模型的特征提取器
         print(f"[SingleModel] Loading {self.model_name} backbone...")
@@ -220,15 +318,27 @@ class SingleModelInference:
         self.obs_dim = self.feature_extractor.output_dim
         print(f"  Model: {self.model_name} (dim={self.obs_dim})")
         
-        # 2. 创建Policy
+        # 2. 创建Policy（根据 checkpoint 类型选择）
         print("[SingleModel] Creating Policy...")
-        self.policy = SingleModelDPPolicy(
-            obs_dim=self.obs_dim,
-            action_dim=14,
-            horizon=self.horizon,
-            n_obs_steps=self.n_obs_steps,
-            num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
-        )
+        if self.use_proprio:
+            effective_vis_dim = vis_dim if vis_dim > 0 else self.obs_dim
+            self.policy = SingleModelProprioPolicy(
+                vis_dim=effective_vis_dim,
+                proprio_dim=self.proprio_dim,
+                action_dim=14,
+                horizon=self.horizon,
+                n_obs_steps=self.n_obs_steps,
+                num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
+            )
+            print(f"  [Proprio] vis_dim={effective_vis_dim}, proprio_dim={self.proprio_dim}")
+        else:
+            self.policy = SingleModelDPPolicy(
+                obs_dim=self.obs_dim,
+                action_dim=14,
+                horizon=self.horizon,
+                n_obs_steps=self.n_obs_steps,
+                num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
+            )
         
         # 3. 加载权重
         print("[SingleModel] Loading weights...")
@@ -288,15 +398,33 @@ class SingleModelInference:
             # 转tensor: [1, To, D]
             features = torch.from_numpy(features_np).float().unsqueeze(0).to(self.device)
             
+            # 2.5 ✅ 准备 agent_pos（如果是 proprio 模型）
+            agent_pos_tensor = None
+            if self.use_proprio:
+                try:
+                    ap_list = []
+                    for o in self.obs_buffer:
+                        ap = np.asarray(o.get('agent_pos', []), dtype=np.float32).reshape(-1)
+                        ap_list.append(ap)
+                    if len(ap_list) > 0 and all(a.shape == ap_list[0].shape for a in ap_list):
+                        ap_seq = np.stack(ap_list, axis=0)  # [To, 14]
+                        agent_pos_tensor = torch.from_numpy(ap_seq).float().to(self.device).unsqueeze(0)  # [1, To, 14]
+                except Exception as e:
+                    print(f"[WARNING] Failed to prepare agent_pos: {e}")
+                    agent_pos_tensor = None
+            
             # 3. 通过policy预测
             with torch.no_grad():
-                action_pred = self.policy(features)  # [1, Ta, A] - 已自动反归一化
+                if self.use_proprio:
+                    action_pred = self.policy(features, agent_pos=agent_pos_tensor)
+                else:
+                    action_pred = self.policy(features)
             
             action_pred = action_pred.squeeze(0).cpu().numpy()  # [Ta, A]
             
-            print(f"[DEBUG] 模型输出 ({self.model_name}):")
-            print(f"  Range: [{action_pred.min():.3f}, {action_pred.max():.3f}]")
-            print(f"  Mean: {action_pred.mean():.3f}, Std: {action_pred.std():.3f}")
+            # print(f"[DEBUG] 模型输出 ({self.model_name}{'+proprio' if self.use_proprio else ''}):")
+            # print(f"  Range: [{action_pred.min():.3f}, {action_pred.max():.3f}]")
+            # print(f"  Mean: {action_pred.mean():.3f}, Std: {action_pred.std():.3f}")
             
             # Clip安全限制
             action_pred = np.clip(action_pred, -3.0, 3.0)
@@ -342,8 +470,3 @@ def eval(TASK_ENV, model, observation):
 def reset_model(model):
     """RoBoTwin标准接口"""
     model.reset()
-
-
-def get_model(usr_args):
-    """RoBoTwin标准接口 - 创建模型实例"""
-    return SingleModelInference(usr_args)

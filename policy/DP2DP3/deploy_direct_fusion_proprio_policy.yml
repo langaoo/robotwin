@@ -1,0 +1,42 @@
+# DP2DP3 Direct Fusion + Proprio Policy Configuration for RoBoTwin
+# 用于4模型直接融合 + 本体感知训练模型的推理配置
+
+# ✅ 指定deploy模块
+deploy_module: DP2DP3.deploy_direct_fusion_policy
+
+# 任务配置
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_direct_fusion_proprio
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+# 模型架构参数
+model:
+  fusion:
+    type: weighted
+    out_dim: 1280
+  
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14
+
+features:
+  models:
+    - name: croco
+      dim: 1024
+    - name: vggt
+      dim: 2048
+    - name: dinov3
+      dim: 768
+    - name: da3
+      dim: 2048

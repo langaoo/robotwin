@@ -32,13 +32,41 @@ echo -e "\033[33m[DP2DP3] Checkpoint: ${checkpoint_num}\033[0m"
 echo -e "\033[33m[DP2DP3] n_action_exec: ${n_action_exec}\033[0m"
 echo -e "\033[33m[DP2DP3] Seed: ${seed}\033[0m"
 
-# 切换到 RoboTwin 根目录
-cd ../..
+# 切换到 RoboTwin 根目录（兼容从任意位置执行该脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/../.."
+
+# Python 解释器选择（默认使用环境里的 python；若不存在则回退到 python3）
+PYTHON_BIN=${PYTHON_BIN:-python}
+if ! command -v ${PYTHON_BIN} >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN=python3
+    fi
+fi
+
+# 可选：动作/TCP 日志（JSONL）。不设置则与 baseline 行为完全一致。
+# 用法示例：
+#   export DP2DP3_ACTION_LOG_PATH=policy/DP2DP3/logs/action_logs/eval100_ckpt600_k4_plan4.jsonl
+#   export DP2DP3_EVAL_VIDEO_LOG=0   # 跑 100 episodes 时建议关掉视频，避免磁盘爆炸
+EXTRA_ARGS=()
+if [[ -n "${DP2DP3_ACTION_LOG_PATH}" ]]; then
+    EXTRA_ARGS+=(--action_log_path "${DP2DP3_ACTION_LOG_PATH}")
+fi
+if [[ -n "${DP2DP3_EVAL_VIDEO_LOG}" ]]; then
+    EXTRA_ARGS+=(--eval_video_log "${DP2DP3_EVAL_VIDEO_LOG}")
+fi
+if [[ -n "${DP2DP3_EVAL_START_SEED}" ]]; then
+    EXTRA_ARGS+=(--eval_start_seed "${DP2DP3_EVAL_START_SEED}")
+fi
+if [[ -n "${DP2DP3_EVAL_START_ID}" ]]; then
+    EXTRA_ARGS+=(--eval_start_id "${DP2DP3_EVAL_START_ID}")
+fi
 
 # 运行评估
 # 注意: CUDA_VISIBLE_DEVICES已经映射物理GPU,所以传入gpu_id=0使用映射后的设备
+DEPLOY_CONFIG=${DP2DP3_DEPLOY_CONFIG:-policy/$policy_name/deploy_policy.yml}
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
+${PYTHON_BIN} script/eval_policy.py --config ${DEPLOY_CONFIG} \
     --overrides \
     --task_name ${task_name} \
     --task_config ${task_config} \
@@ -50,4 +78,5 @@ python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
     --gpu_id 0 \
     --n_action_exec ${n_action_exec} \
     --gpu_ids "[${gpu_ids}]" \
-    ${eval_test_num:+--eval_test_num ${eval_test_num}}
+    ${eval_test_num:+--eval_test_num ${eval_test_num}} \
+    "${EXTRA_ARGS[@]}"

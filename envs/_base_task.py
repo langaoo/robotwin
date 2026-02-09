@@ -436,7 +436,23 @@ class Base_Task(gym.Env):
 
     def get_obs(self):
         self._update_render()
-        self.cameras.update_picture()
+        # 某些任务在数据收集阶段会偶发 "RuntimeError: cannot create buffer"
+        # 典型原因：渲染缓冲区分配失败（显存碎片/纹理过多/缓存未及时释放）
+        # 处理策略：遇到该错误时清理渲染缓存并重试一次，避免直接崩溃
+        try:
+            self.cameras.update_picture()
+        except RuntimeError as e:
+            if "cannot create buffer" in str(e).lower():
+                print("[WARN] camera buffer allocation failed, clearing sapien cache and retrying once...")
+                try:
+                    sapien_clear_cache()
+                except Exception:
+                    pass
+                # 重新同步渲染并重试一次
+                self.scene.update_render()
+                self.cameras.update_picture()
+            else:
+                raise
         pkl_dic = {
             "observation": {},
             "pointcloud": [],
@@ -1492,6 +1508,12 @@ class Base_Task(gym.Env):
             return
 
         eval_video_freq = 1  # fixed
+        # 可选：密集写入评估视频帧，避免“闪现/瞬移”的观感（默认关闭，不影响原有逻辑）
+        # 背景：take_action 内部会用 TOPP 在 250Hz 下执行一段轨迹，但评估视频默认只在每次 take_action 写 1 帧，
+        # 导致视频看起来像“瞬移”。开启后会在控制环中按固定间隔写更多帧，视频轨迹更连续。
+        dense_eval_video = bool(int(os.environ.get("ROBOTWIN_EVAL_VIDEO_DENSE", "0")))
+        dense_interval = int(os.environ.get("ROBOTWIN_EVAL_VIDEO_DENSE_INTERVAL", "25"))  # 250Hz / 25 ~= 10fps
+        dense_counter = 0
         if (self.eval_video_path is not None and self.take_action_cnt % eval_video_freq == 0):
             self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
 
@@ -1684,6 +1706,18 @@ class Base_Task(gym.Env):
 
             self.scene.step()
             self._update_render()
+
+            # 密集写帧：按固定内部步长采样 head_camera，减少“闪现/卡顿”观感
+            if dense_eval_video and self.eval_video_path is not None and dense_interval > 0:
+                dense_counter += 1
+                if dense_counter % dense_interval == 0:
+                    try:
+                        self.cameras.update_picture()
+                        rgb = self.cameras.get_rgb().get("head_camera", {}).get("rgb", None)
+                        if rgb is not None:
+                            self.eval_video_ffmpeg.stdin.write(rgb.tobytes())
+                    except Exception:
+                        pass
                 
             if self.check_success():
                 self.eval_success = True

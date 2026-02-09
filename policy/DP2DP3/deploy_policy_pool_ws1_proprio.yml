@@ -1,0 +1,27 @@
+# DP2DP3 Policy Configuration for RoBoTwin (pool_ws1 + proprio)
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_4models
+checkpoint_num: best
+expert_data_num: null
+use_rgb: true
+
+encoder:
+  checkpoint: /home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_pool_ws1/ckpt_final.pt
+  freeze: true
+  dummy_mode: none
+
+policy:
+  type: OfficialDP
+  num_inference_steps: 100
+  # 本体感知
+  use_proprio: true
+  proprio_dim: 14
+  proprio_mode: concat
+  proprio_hidden: 256

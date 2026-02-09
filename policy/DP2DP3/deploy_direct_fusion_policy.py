@@ -150,8 +150,8 @@ class DirectFusionDPPolicy(nn.Module):
         self,
         fusion_encoder: SimpleFusionEncoder,
         action_dim: int = 14,
-        horizon: int = 4,
-        n_obs_steps: int = 4,
+        horizon: int = 8,
+        n_obs_steps: int = 3,
         num_inference_steps: int = 100,
     ):
         super().__init__()
@@ -164,6 +164,7 @@ class DirectFusionDPPolicy(nn.Module):
         self.horizon = horizon
         self.n_obs_steps = n_obs_steps
         self.num_inference_steps = num_inference_steps
+        self.use_proprio = False
         # ✅ 使用LinearNormalizer管理归一化
         self.normalizer = LinearNormalizer()
         self.use_normalizer = False
@@ -198,7 +199,7 @@ class DirectFusionDPPolicy(nn.Module):
             prediction_type='epsilon'
         )
     
-    def forward(self, rgb_feats):
+    def forward(self, rgb_feats, agent_pos=None):
         """
         推理模式
         rgb_feats: [B, To, M, C] - 4个模型的RGB特征
@@ -232,6 +233,94 @@ class DirectFusionDPPolicy(nn.Module):
         # ✅ 反归一化到动作原始尺度（若checkpoint提供normalizer）
         if self.use_normalizer:
             action = self.normalizer.unnormalize({'action': action})['action']
+        return action
+
+
+class DirectFusionProprioPolicy(nn.Module):
+    """直接融合 + proprio + Diffusion Policy（DP-aligned: agent_pos 直接拼接）"""
+    
+    def __init__(
+        self,
+        fusion_encoder: SimpleFusionEncoder,
+        proprio_dim: int = 14,
+        action_dim: int = 14,
+        horizon: int = 8,
+        n_obs_steps: int = 3,
+        num_inference_steps: int = 100,
+    ):
+        super().__init__()
+        
+        if not HAS_OFFICIAL_DP:
+            raise RuntimeError("正版DP未加载")
+        
+        self.fusion_encoder = fusion_encoder
+        self.proprio_dim = proprio_dim
+        self.action_dim = action_dim
+        self.horizon = horizon
+        self.n_obs_steps = n_obs_steps
+        self.num_inference_steps = num_inference_steps
+        self.use_proprio = True
+        self.normalizer = LinearNormalizer()
+        self.use_normalizer = True
+        
+        per_step_dim = fusion_encoder.out_dim + proprio_dim
+        obs_encoder_dim = per_step_dim * n_obs_steps
+        
+        self.obs_encoder = nn.Sequential(
+            nn.Linear(obs_encoder_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+        )
+        
+        self.noise_pred_net = ConditionalUnet1D(
+            input_dim=action_dim,
+            global_cond_dim=256,
+            diffusion_step_embed_dim=128,
+            down_dims=[256, 512, 1024],
+            kernel_size=5,
+            n_groups=8,
+            cond_predict_scale=True,
+        )
+        
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=100,
+            beta_schedule='squaredcos_cap_v2',
+            clip_sample=True,
+            prediction_type='epsilon'
+        )
+    
+    def forward(self, rgb_feats, agent_pos=None):
+        """
+        推理
+        rgb_feats: [B, To, M, C]
+        agent_pos: [B, To, proprio_dim]
+        """
+        B = rgb_feats.shape[0]
+        device = rgb_feats.device
+        
+        fused = self.fusion_encoder(rgb_feats)  # [B, To, D]
+        
+        if agent_pos is not None:
+            nagent_pos = self.normalizer['agent_pos'].normalize(agent_pos)
+            obs_combined = torch.cat([fused, nagent_pos], dim=-1)
+        else:
+            zeros = torch.zeros(B, fused.shape[1], self.proprio_dim, device=device)
+            obs_combined = torch.cat([fused, zeros], dim=-1)
+        
+        obs_flat = obs_combined.reshape(B, -1)
+        obs_cond = self.obs_encoder(obs_flat)
+        
+        action = torch.randn((B, self.horizon, self.action_dim), device=device)
+        self.noise_scheduler.set_timesteps(self.num_inference_steps)
+        
+        for t in self.noise_scheduler.timesteps:
+            noise_pred = self.noise_pred_net(
+                action, t.unsqueeze(0).expand(B).to(device), global_cond=obs_cond
+            )
+            action = self.noise_scheduler.step(noise_pred, t, action).prev_sample
+        
+        action = self.normalizer.unnormalize({'action': action})['action']
         return action
 
 
@@ -269,6 +358,7 @@ class DirectFusionModel:
         
         # 构建checkpoint路径 - 直接融合的checkpoints在特殊目录
         ckpt_dir_name = f"{self.task_name}-{self.ckpt_setting}-{self.expert_data_num}-{self.seed}"
+        ckpt_dir_name_proprio = f"{ckpt_dir_name}-proprio"
 
         # 允许通过环境变量指定checkpoint根目录（用于ws1等变体）
         # 例：DP2DP3_DIRECT_FUSION_CKPT_ROOTS=/path/to/checkpoints_direct_fusion_ws1
@@ -283,7 +373,9 @@ class DirectFusionModel:
                 self.features_model_dir / "checkpoints_direct_fusion_ws1",
             ]
 
-        possible_dirs = [root / ckpt_dir_name for root in ckpt_roots]
+        # proprio版优先搜索
+        possible_dirs = [root / ckpt_dir_name_proprio for root in ckpt_roots] + \
+                        [root / ckpt_dir_name for root in ckpt_roots]
         
         ckpt_dir = None
         for d in possible_dirs:
@@ -330,10 +422,14 @@ class DirectFusionModel:
         
         # 从checkpoint恢复配置
         config = ckpt.get('config', {})
-        self.horizon = config.get('data', {}).get('horizon', 4)
-        self.n_obs_steps = config.get('data', {}).get('n_obs_steps', 4)
+        self.horizon = config.get('data', {}).get('horizon', 8)
+        self.n_obs_steps = config.get('data', {}).get('n_obs_steps', 3)
         self.fusion_type = config.get('fusion', {}).get('type', 'weighted')
         self.fuse_dim = config.get('fusion', {}).get('out_dim', 1280)
+        
+        # ✅ 检测是否是 proprio 版 checkpoint
+        policy_class = ckpt.get('policy_class', '')
+        self.use_proprio = (policy_class == 'DirectFusionProprioPolicy')
         
         # 动作维度
         include_gripper = config.get('data', {}).get('include_gripper', True)
@@ -347,6 +443,8 @@ class DirectFusionModel:
         
         print(f"[DirectFusion] Config: horizon={self.horizon}, n_obs_steps={self.n_obs_steps}")
         print(f"[DirectFusion] Fusion: type={self.fusion_type}, dim={self.fuse_dim}")
+        print(f"[DirectFusion] Policy class: {policy_class or 'DirectFusionDPPolicy'}")
+        print(f"[DirectFusion] use_proprio: {self.use_proprio}")
         
         # 1. 加载4个RGB backbone
         print("[DirectFusion] Loading Vision Backbones...")
@@ -383,15 +481,25 @@ class DirectFusionModel:
             except Exception:
                 print(f"[DirectFusion] Failed to parse fusion mask: {mask_env}")
         
-        # 3. 创建Policy
+        # 3. 创建Policy（根据 checkpoint 类型选择）
         print("[DirectFusion] Creating Policy...")
-        self.policy = DirectFusionDPPolicy(
-            fusion_encoder=fusion_encoder,
-            action_dim=self.action_dim,
-            horizon=self.horizon,
-            n_obs_steps=self.n_obs_steps,
-            num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
-        )
+        if self.use_proprio:
+            self.policy = DirectFusionProprioPolicy(
+                fusion_encoder=fusion_encoder,
+                proprio_dim=14,
+                action_dim=self.action_dim,
+                horizon=self.horizon,
+                n_obs_steps=self.n_obs_steps,
+                num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
+            )
+        else:
+            self.policy = DirectFusionDPPolicy(
+                fusion_encoder=fusion_encoder,
+                action_dim=self.action_dim,
+                horizon=self.horizon,
+                n_obs_steps=self.n_obs_steps,
+                num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
+            )
         
         # 4. 加载权重
         print("[DirectFusion] Loading weights...")
@@ -455,6 +563,21 @@ class DirectFusionModel:
                 img_pil = Image.fromarray(img_np, mode='RGB')
                 images.append(img_pil)
             
+            # 1.5 ✅ 准备 agent_pos（如果是 proprio 模型）
+            agent_pos_tensor = None
+            if self.use_proprio:
+                try:
+                    ap_list = []
+                    for o in self.obs_buffer:
+                        ap = np.asarray(o.get('agent_pos', []), dtype=np.float32).reshape(-1)
+                        ap_list.append(ap)
+                    if len(ap_list) > 0 and all(a.shape == ap_list[0].shape for a in ap_list):
+                        ap_seq = np.stack(ap_list, axis=0)  # [To, 14]
+                        agent_pos_tensor = torch.from_numpy(ap_seq).float().to(self.device).unsqueeze(0)  # [1, To, 14]
+                except Exception as e:
+                    print(f"[WARNING] Failed to prepare agent_pos: {e}")
+                    agent_pos_tensor = None
+            
             # 2. 批量提取RGB特征
             # MultiGPUFeatureExtractors.extract_batch 返回 [B, 4, 2048]
             # 其中每个模型的特征都pad到2048维，实际维度是:
@@ -503,7 +626,10 @@ class DirectFusionModel:
             
             # 4. 通过policy预测动作
             with torch.no_grad():
-                action_pred = self.policy(features)  # [1, Ta, A]
+                if self.use_proprio:
+                    action_pred = self.policy(features, agent_pos=agent_pos_tensor)
+                else:
+                    action_pred = self.policy(features)  # [1, Ta, A]
             
             action_pred = action_pred.squeeze(0).cpu().numpy()  # [Ta, A]
 
@@ -511,12 +637,12 @@ class DirectFusionModel:
             if not getattr(self.policy, 'use_normalizer', False):
                 action_pred = self._manual_unnormalize_action(action_pred)
             
-            # 🔍 调试输出: 模型输出范围
-            print(f"[DEBUG] 模型输出:")
-            print(f"  Shape: {action_pred.shape}")
-            print(f"  Range: [{action_pred.min():.3f}, {action_pred.max():.3f}]")
-            print(f"  Mean: {action_pred.mean():.3f}, Std: {action_pred.std():.3f}")
-            print(f"  First action: {action_pred[0]}")
+            # 🔍 调试输出: 模型输出范围（已注释）
+            # print(f"[DEBUG] 模型输出:")
+            # print(f"  Shape: {action_pred.shape}")
+            # print(f"  Range: [{action_pred.min():.3f}, {action_pred.max():.3f}]")
+            # print(f"  Mean: {action_pred.mean():.3f}, Std: {action_pred.std():.3f}")
+            # print(f"  First action: {action_pred[0]}")
 
             # 🔧 安全限制：防止异常值
             action_pred_before_clip = action_pred.copy()
