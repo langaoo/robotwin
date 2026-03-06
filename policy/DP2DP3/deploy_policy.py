@@ -313,7 +313,8 @@ class DPAlignedPolicy(nn.Module):
 
     与 DPRGBPolicy 的区别：
     - agent_pos 不通过独立 MLP，而是归一化后直接拼接到 obs 特征
-    - obs_encoder 输入维度 = n_obs_steps * (1280 + proprio_dim)
+    - obs_encoder 输入维度 = n_obs_steps * (effective_vis_dim + proprio_dim)
+    - 支持可选的 vis_projector（方案A：对齐特征后加可学习投影层）
     """
 
     def __init__(
@@ -326,6 +327,8 @@ class DPAlignedPolicy(nn.Module):
         num_inference_steps: int = 100,
         use_proprio: bool = False,
         proprio_dim: int = 14,
+        vis_projector_type: str = "none",
+        vis_projector_dim: int = 1280,
     ):
         super().__init__()
         if not HAS_OFFICIAL_DP:
@@ -342,7 +345,27 @@ class DPAlignedPolicy(nn.Module):
         self.normalizer = LinearNormalizer()
         self.use_normalizer = False
 
-        per_step_dim = vis_dim + (self.proprio_dim if use_proprio else 0)
+        # 可选的可学习 vis_projector
+        self.vis_projector_type = vis_projector_type
+        if vis_projector_type == "linear":
+            self.vis_projector = nn.Sequential(
+                nn.Linear(vis_dim, vis_projector_dim),
+                nn.LayerNorm(vis_projector_dim),
+            )
+            effective_vis_dim = vis_projector_dim
+        elif vis_projector_type == "mlp":
+            self.vis_projector = nn.Sequential(
+                nn.Linear(vis_dim, vis_dim * 2),
+                nn.GELU(),
+                nn.Linear(vis_dim * 2, vis_projector_dim),
+                nn.LayerNorm(vis_projector_dim),
+            )
+            effective_vis_dim = vis_projector_dim
+        else:
+            self.vis_projector = None
+            effective_vis_dim = vis_dim
+
+        per_step_dim = effective_vis_dim + (self.proprio_dim if use_proprio else 0)
         obs_input_dim = n_obs_steps * per_step_dim
 
         self.obs_encoder = nn.Sequential(
@@ -370,6 +393,11 @@ class DPAlignedPolicy(nn.Module):
     def forward(self, obs, agent_pos=None):
         B = obs.shape[0]
         device = obs.device
+
+        # 如果有可学习的 vis_projector，先对视觉特征做投影
+        if self.vis_projector is not None:
+            B_orig, To, D = obs.shape
+            obs = self.vis_projector(obs.reshape(B_orig * To, D)).reshape(B_orig, To, -1)
 
         if self.use_proprio and agent_pos is not None:
             if self.use_normalizer and "agent_pos" in self.normalizer.params_dict:
@@ -1127,6 +1155,9 @@ class DP2DP3Model:
             )
         elif policy_type == 'DPAligned':
             # DP-Aligned: agent_pos 直接 concat（无独立 MLP）
+            # 从 checkpoint 或 config 读取 vis_projector 配置
+            vis_projector_type = str(ckpt.get('vis_projector_type', config.get('policy', {}).get('vis_projector_type', 'none')))
+            vis_projector_dim = int(ckpt.get('vis_projector_dim', config.get('policy', {}).get('vis_projector_dim', 1280)))
             self.policy = DPAlignedPolicy(
                 vis_dim=1280,
                 action_dim=self.model_action_dim,
@@ -1136,6 +1167,8 @@ class DP2DP3Model:
                 num_inference_steps=config.get('policy', {}).get('num_inference_steps', 100),
                 use_proprio=use_proprio,
                 proprio_dim=proprio_dim,
+                vis_projector_type=vis_projector_type,
+                vis_projector_dim=vis_projector_dim,
             )
         elif policy_type == 'DPAlignedDualStream':
             token_dim = int(ckpt.get('token_dim', 1280))

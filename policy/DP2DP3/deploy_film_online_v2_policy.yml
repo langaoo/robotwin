@@ -1,0 +1,33 @@
+# DP2DP3 在线 2 模型 DA3-FiLM v2 部署配置 (AttentionPooling)
+# 对应训练脚本: tools/depth_guided_film_online_v2/train_film_online_v2.py
+# 对应 deploy:  deploy_film_online_v2_policy.py
+# Checkpoint 目录: checkpoints_film_online_v2/<task>-<ckpt_setting>-<N>-<seed>/
+#
+# 与 v1 (deploy_film_online_policy.yml) 的区别:
+#   deploy_module -> deploy_film_online_v2_policy
+#   config_name   -> dp2dp3_film_online_v2_attn
+
+# ✅ 指定 deploy 模块
+deploy_module: DP2DP3.deploy_film_online_v2_policy
+
+# 任务配置（由 eval 脚本传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_film_online_v2_attn
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+# 模型架构参数（deploy 时从 checkpoint 的 encoder_cfg 自动恢复）
+model:
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14

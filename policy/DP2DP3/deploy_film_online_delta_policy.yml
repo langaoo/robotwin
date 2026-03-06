@@ -1,0 +1,28 @@
+# DP2DP3 FiLM 时序差分部署配置
+# 对应训练脚本: tools/depth_guided_film_online_delta/train_film_online_delta.py
+# 对应 deploy: deploy_film_online_delta_policy.py
+# Checkpoint 目录: checkpoints_film_online_delta/<task>-<ckpt_setting>-<N>-<seed>/
+#
+# geo_vec = mean(DA3_proj[t] - DA3_proj[t-1])  静止前景差分≈0
+
+# ✅ 指定 deploy 模块
+deploy_module: DP2DP3.deploy_film_online_delta_policy
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_film_online_delta
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+model:
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14

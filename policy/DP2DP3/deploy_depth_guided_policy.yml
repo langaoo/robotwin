@@ -1,0 +1,36 @@
+# DP2DP3 Depth-Guided Cross-Attention Fusion Policy Configuration
+# 用于 depth_guided 训练模型的推理配置
+#
+# 对应训练脚本: tools/depth_guided/train_depth_guided_offline_proprio.py
+# 对应配置文件: configs/depth_guided/train_depth_guided_proprio.yaml
+# Checkpoint 目录: checkpoints_depth_guided/<task>-<ckpt_setting>-<N>-<seed>/
+#
+# 架构:
+#   语义组 Q: CroCo + VGGT + DINOv3
+#   几何组KV: DA3
+#   Cross-Attention (n_layers=2) + proprio + ConditionalUnet1D
+
+# ✅ 指定 deploy 模块
+deploy_module: DP2DP3.deploy_depth_guided_policy
+
+# 任务配置（由 eval 脚本传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_depth_guided
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+# 模型架构参数（与训练配置对齐，deploy 时从 checkpoint 的 encoder_cfg 自动恢复）
+model:
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14

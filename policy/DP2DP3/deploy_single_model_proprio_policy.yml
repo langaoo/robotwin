@@ -17,13 +17,16 @@ config_name: dp2dp3_single_model_proprio
 checkpoint_num: 600
 expert_data_num: null
 use_rgb: true
-model_name: dinov3
+# model_name: dinov3
+model_name: croco
 
 # 模型架构参数
 model:
   models:
-    dinov3:
-      dim: 768
+    # dinov3:
+    #   dim: 768
+    croco:
+      dim: 1024
   
   head:
     horizon: 8

@@ -19,6 +19,8 @@ gpu_ids=${6:-1}                              # GPU IDs (e.g. "0" or "0,1")
 checkpoint_num=${7:-50}                      # checkpoint 编号（默认 50）
 n_action_exec=${8:-4}                        # Receding Horizon执行步数
 eval_test_num=${9:-5}
+shift 9 2>/dev/null || true   # 移除前9个位置参数，剩余的作为透传参数
+PASSTHROUGH_ARGS=("$@")       # 收集剩余参数 (e.g. --force_gate 0.0)
 
 # 设置 GPU
 export CUDA_VISIBLE_DEVICES=${gpu_ids}
@@ -79,4 +81,5 @@ ${PYTHON_BIN} script/eval_policy.py --config ${DEPLOY_CONFIG} \
     --n_action_exec ${n_action_exec} \
     --gpu_ids "[${gpu_ids}]" \
     ${eval_test_num:+--eval_test_num ${eval_test_num}} \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" \
+    "${PASSTHROUGH_ARGS[@]}"

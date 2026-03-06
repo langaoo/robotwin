@@ -1,0 +1,36 @@
+# DP2DP3 tokens_full global-only + DP-Aligned Proprio Policy Configuration
+# 用于 tokens_full global-only 消融实验的推理配置
+#
+# 训练脚本: train_offline_head_dp_aligned.py
+# 训练配置: train_offline_tokens_full_global_only_dp_aligned_proprio.yaml
+# Policy 类: DPAlignedPolicy  (policy_class 在 checkpoint 中记录)
+# Checkpoint 路径: checkpoints/lift_pot-demo_clean_tokens_full_global_only_dp_aligned_proprio-50-0/
+#
+# 说明: 使用 tokens_full alignment encoder 的全局向量 (obs_aligned 1280d)
+#       忽略空间 tokens，不使用 DualStream/Cross-Attention
+#       与 Direct Fusion 78% 和 depth_guided 结果做对比
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_4models
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+encoder:
+  checkpoint: /home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_ws1_tokens_full/ckpt_final.pt
+  freeze: true
+  dummy_mode: none
+
+policy:
+  type: OfficialDP
+  num_inference_steps: 100
+  use_tokens: false           # 仅使用全局向量，不用 DualStream
+  use_proprio: true
+  proprio_dim: 14
+  vis_projector_type: none    # 直接用 obs_aligned（无额外投影层）

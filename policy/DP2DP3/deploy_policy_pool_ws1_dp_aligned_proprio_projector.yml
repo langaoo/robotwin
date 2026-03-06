@@ -1,0 +1,31 @@
+# DP2DP3 Policy - pool_ws1 + 可学习 vis_projector + DP-Aligned Proprio
+#
+# 方案A验证：在 pool_ws1 对齐特征后加可学习的 MLP projector
+# 训练脚本: train_offline_head_dp_aligned.py
+# 训练配置: train_offline_pool_ws1_dp_aligned_proprio_projector.yaml
+# Policy 类: DPAlignedPolicy (with vis_projector=mlp)
+
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_4models
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+encoder:
+  checkpoint: /home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_pool_ws1/ckpt_final.pt
+  freeze: true
+  dummy_mode: none
+
+policy:
+  type: OfficialDP
+  num_inference_steps: 100
+  use_proprio: true
+  proprio_dim: 14
+  vis_projector_type: mlp
+  vis_projector_dim: 1280

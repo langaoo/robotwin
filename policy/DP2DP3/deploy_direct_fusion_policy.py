@@ -359,32 +359,39 @@ class DirectFusionModel:
         # 构建checkpoint路径 - 直接融合的checkpoints在特殊目录
         ckpt_dir_name = f"{self.task_name}-{self.ckpt_setting}-{self.expert_data_num}-{self.seed}"
         ckpt_dir_name_proprio = f"{ckpt_dir_name}-proprio"
+        ckpt_dir_name_3model = f"{ckpt_dir_name}-3model-proprio"
 
-        # 允许通过环境变量指定checkpoint根目录（用于ws1等变体）
-        # 例：DP2DP3_DIRECT_FUSION_CKPT_ROOTS=/path/to/checkpoints_direct_fusion_ws1
-        ckpt_roots_env = os.environ.get("DP2DP3_DIRECT_FUSION_CKPT_ROOTS", "").strip()
-        if ckpt_roots_env:
-            ckpt_roots = [Path(p) for p in ckpt_roots_env.split(":") if p]
+        # ✅ 优先级1: 通过环境变量直接指定完整 checkpoint 目录（通用方案）
+        direct_ckpt_dir = os.environ.get("DP2DP3_DIRECT_FUSION_CKPT_DIR", "").strip()
+        if direct_ckpt_dir and Path(direct_ckpt_dir).exists():
+            ckpt_dir = Path(direct_ckpt_dir)
+            print(f"[DirectFusion] Using env-specified ckpt dir: {ckpt_dir}")
         else:
-            ckpt_roots = [
-                self.policy_dir / "checkpoints_direct_fusion",
-                self.features_model_dir / "checkpoints_direct_fusion",
-                self.policy_dir / "checkpoints_direct_fusion_ws1",
-                self.features_model_dir / "checkpoints_direct_fusion_ws1",
-            ]
+            # 优先级2: 通过环境变量指定checkpoint根目录
+            ckpt_roots_env = os.environ.get("DP2DP3_DIRECT_FUSION_CKPT_ROOTS", "").strip()
+            if ckpt_roots_env:
+                ckpt_roots = [Path(p) for p in ckpt_roots_env.split(":") if p]
+            else:
+                ckpt_roots = [
+                    self.policy_dir / "checkpoints_direct_fusion",
+                    self.features_model_dir / "checkpoints_direct_fusion",
+                    self.policy_dir / "checkpoints_direct_fusion_ws1",
+                    self.features_model_dir / "checkpoints_direct_fusion_ws1",
+                ]
 
-        # proprio版优先搜索
-        possible_dirs = [root / ckpt_dir_name_proprio for root in ckpt_roots] + \
-                        [root / ckpt_dir_name for root in ckpt_roots]
-        
-        ckpt_dir = None
-        for d in possible_dirs:
-            if d.exists():
-                ckpt_dir = d
-                break
-        
-        if ckpt_dir is None:
-            raise FileNotFoundError(f"Checkpoint directory not found in: {possible_dirs}")
+            # 搜索顺序: 3model-proprio → proprio → 无后缀
+            possible_dirs = [root / ckpt_dir_name_3model for root in ckpt_roots] + \
+                            [root / ckpt_dir_name_proprio for root in ckpt_roots] + \
+                            [root / ckpt_dir_name for root in ckpt_roots]
+
+            ckpt_dir = None
+            for d in possible_dirs:
+                if d.exists():
+                    ckpt_dir = d
+                    break
+
+            if ckpt_dir is None:
+                raise FileNotFoundError(f"Checkpoint directory not found in: {possible_dirs}")
         
         if str(self.checkpoint_num).lower() == 'best':
             ckpt_files = list(ckpt_dir.glob("*.ckpt"))
@@ -462,9 +469,41 @@ class DirectFusionModel:
         self.feature_extractors = MultiGPUFeatureExtractors(gpu_ids=gpu_ids)
         
         # 2. 创建融合编码器
+        # 优先从 checkpoint 读取 fusion_in_dims（支持3模型和4模型）
+        # 4模型默认: (1024, 2048, 768, 2048)  CroCo, VGGT, DINOv3, DA3
+        # 3模型: (1024, 2048, 768)            CroCo, VGGT, DINOv3
+        default_in_dims = (1024, 2048, 768, 2048)
+        saved_in_dims = ckpt.get('fusion_in_dims', None)
+        if saved_in_dims is not None:
+            self.fusion_in_dims = tuple(int(d) for d in saved_in_dims)
+        else:
+            self.fusion_in_dims = default_in_dims
+        self.n_models = len(self.fusion_in_dims)
+
+        # ✅ 通用模型索引：从 checkpoint 读取使用了哪些模型（在4模型全集中的位置）
+        # 例: [0,2] 表示 CroCo+DINOv3，[0,1,2] 表示 CroCo+VGGT+DINOv3
+        saved_indices = ckpt.get('model_indices', None)
+        saved_names = ckpt.get('model_names', None)
+        if saved_indices is not None:
+            self.model_indices = [int(i) for i in saved_indices]
+        elif self.n_models == 4:
+            self.model_indices = [0, 1, 2, 3]
+        elif self.n_models == 3:
+            # 向后兼容旧3模型checkpoint（去DA3）
+            self.model_indices = [0, 1, 2]
+        else:
+            # 2模型无法自动推断，报错
+            raise ValueError(
+                f"Checkpoint 缺少 model_indices，且 n_models={self.n_models} 无法自动推断。"
+                f"请使用通用训练脚本重新训练。"
+            )
+        print(f"[DirectFusion] Fusion in_dims: {self.fusion_in_dims} ({self.n_models} models)")
+        print(f"[DirectFusion] Model indices: {self.model_indices}"
+              f" (names: {saved_names or 'N/A'})")
+
         print("[DirectFusion] Creating Fusion Encoder...")
         fusion_encoder = SimpleFusionEncoder(
-            in_dims=(1024, 2048, 768, 2048),
+            in_dims=self.fusion_in_dims,
             fusion_type=self.fusion_type,
             out_dim=self.fuse_dim,
         )
@@ -579,38 +618,23 @@ class DirectFusionModel:
                     agent_pos_tensor = None
             
             # 2. 批量提取RGB特征
-            # MultiGPUFeatureExtractors.extract_batch 返回 [B, 4, 2048]
-            # 其中每个模型的特征都pad到2048维，实际维度是:
-            # - CroCo: 1024维 (剩余pad 0)
-            # - VGGT: 2048维 (完整)
-            # - DINOv3: 768维 (剩余pad 0)  
-            # - DA3: 2048维 (完整)
+            # MultiGPUFeatureExtractors.extract_batch 返回 [To, 4, 2048]（固定输出4模型，pad到2048）
+            # 通过 model_indices 选取需要的模型（支持任意子集）
             features_np = self.feature_extractors.extract_batch(images)  # [To, 4, 2048]
             
-            # 3. 转换为tensor并提取每个模型的实际维度
-            # 我们需要 [1, To, M, C_i] 其中 C_i 是每个模型的真实维度
-            # SimpleFusionEncoder的projections会处理不同的输入维度
-            model_dims = [1024, 2048, 768, 2048]  # CroCo, VGGT, DINOv3, DA3
+            # 3. 根据 model_indices + fusion_in_dims 取对应模型的真实维度特征
+            model_dims = list(self.fusion_in_dims)   # e.g. [1024,768] or [1024,2048,768,2048]
             To = features_np.shape[0]
             
-            # 提取每个模型的真实维度特征（去掉padding）
             features_list = []
-            for i, dim in enumerate(model_dims):
-                feat = features_np[:, i, :dim]  # [To, dim_i]
+            for mi, (global_idx, dim) in enumerate(zip(self.model_indices, model_dims)):
+                feat = features_np[:, global_idx, :dim]  # [To, dim_i]
                 features_list.append(feat)
             
-            # 为了适配SimpleFusionEncoder的forward，需要统一到 [B, To, M, C_max]
-            # 但fusion encoder会对每个模型用不同的projection，所以需要保持原始维度
-            # 我们需要修改SimpleFusionEncoder.forward的实现，或者在这里做特殊处理
-            
-            # 方案：直接传入 [B, To, M, C_max]，让fusion encoder处理
-            # 注意：SimpleFusionEncoder的projections输入维度是固定的(1024, 2048, 768, 2048)
-            # 所以我们需要确保传入的特征维度匹配
-            
-            # 重新构建：[To, M, C_i] -> [1, To, M, C_max] (padding到最大维度)
+            # 重新构建：[To, M, C_max] (M=n_models, C_max=max(model_dims))
             max_dim = max(model_dims)
             features_padded = []
-            for i, (feat, dim) in enumerate(zip(features_list, model_dims)):
+            for feat, dim in zip(features_list, model_dims):
                 if dim < max_dim:
                     pad_width = max_dim - dim
                     feat_padded = np.pad(feat, ((0, 0), (0, pad_width)), mode='constant')

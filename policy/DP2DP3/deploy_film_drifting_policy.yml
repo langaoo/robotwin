@@ -1,0 +1,32 @@
+# DP2DP3 DA3-FiLM + Drifting Head 部署配置 (Innovation 2)
+# 对应训练脚本: tools/depth_guided_film_drifting/train_film_drifting.py
+# 对应 deploy: deploy_film_drifting_policy.py
+# Checkpoint 目录: checkpoints_film_drifting/<task>-<ckpt_setting>-<N>-<seed>/
+#
+# 架构:
+#   DINOv3(768d, 语义) + DA3(2048d, 几何 FiLM 调制) -> Drifting head (1-step)
+
+# ✅ 指定 deploy 模块
+deploy_module: DP2DP3.deploy_film_drifting_policy
+
+# 任务配置（由 eval 脚本传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# 配置名称
+config_name: dp2dp3_film_drifting
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+# 模型架构参数（deploy 时从 checkpoint 的 encoder_cfg/drifting_cfg 自动恢复）
+model:
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    action_dim: 14
+    inference_steps: 1   # ★ Drifting: single forward pass

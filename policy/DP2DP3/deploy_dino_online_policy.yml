@@ -1,0 +1,27 @@
+# DP2DP3 纯 DINOv3 消融实验部署配置
+# 对应训练脚本: tools/depth_guided_dino_online/train_dino_online.py
+# 对应 deploy: deploy_dino_online_policy.py
+# Checkpoint 目录: checkpoints_dino_online/<task>-<ckpt_setting>-<N>-<seed>/
+
+# ✅ 指定 deploy 模块
+deploy_module: DP2DP3.deploy_dino_online_policy
+
+# 任务配置（由 eval 脚本传入）
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+config_name: dp2dp3_dino_online
+checkpoint_num: 600
+expert_data_num: null
+use_rgb: true
+
+model:
+  head:
+    horizon: 8
+    n_obs_steps: 3
+    num_inference_steps: 100
+    action_dim: 14
