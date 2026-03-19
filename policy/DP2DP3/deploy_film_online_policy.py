@@ -18,6 +18,7 @@ RoBoTwin 标准接口:
 import sys
 import os
 from pathlib import Path
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -233,6 +234,12 @@ class Film2ModelOnline:
 
         self.obs_buffer = deque(maxlen=self.n_obs_steps)
         self.action_queue = deque()
+        # Inference timing accumulators
+        self._timing_backbone_ms = []
+        self._timing_policy_ms = []
+        self._timing_total_ms = []
+        self._episode_call_counts = []
+        self._current_episode_calls = 0
         print(
             f"[Film2Model] Ready: horizon={self.horizon}, "
             f"n_obs_steps={self.n_obs_steps}"
@@ -308,8 +315,37 @@ class Film2ModelOnline:
         print("[Film2Model] All models loaded successfully!")
 
     def reset(self):
+        if self._current_episode_calls > 0:
+            self._episode_call_counts.append(self._current_episode_calls)
+        self._current_episode_calls = 0
         self.obs_buffer.clear()
         self.action_queue.clear()
+
+    def get_timing_summary(self):
+        """Return inference timing summary string for _result.txt."""
+        if self._current_episode_calls > 0:
+            self._episode_call_counts.append(self._current_episode_calls)
+            self._current_episode_calls = 0
+        if not self._timing_total_ms:
+            return ""
+        n = len(self._timing_total_ms)
+        skip = min(1, n - 1)
+        bb = self._timing_backbone_ms[skip:]
+        pol = self._timing_policy_ms[skip:]
+        tot = self._timing_total_ms[skip:]
+        if not tot:
+            return ""
+        lines = [
+            f"\n--- Inference Timing ({len(tot)} calls, excl. {skip} warmup) ---",
+            f"Per-call backbone (DINOv3+DA3):  mean={np.mean(bb):.1f}ms  std={np.std(bb):.1f}ms",
+            f"Per-call policy (Encoder+DDPM):   mean={np.mean(pol):.1f}ms  std={np.std(pol):.1f}ms",
+            f"Per-call total:                   mean={np.mean(tot):.1f}ms  std={np.std(tot):.1f}ms",
+            f"Action Head: DDPM (100 NFE denoising steps)",
+        ]
+        if self._episode_call_counts:
+            lines.append(f"Avg calls per episode: {np.mean(self._episode_call_counts):.1f}")
+            lines.append(f"Avg episode total time: {np.mean(self._episode_call_counts) * np.mean(tot):.0f}ms")
+        return "\n".join(lines)
 
     def update_obs(self, obs):
         self.obs_buffer.append(obs)
@@ -332,6 +368,11 @@ class Film2ModelOnline:
                 img_np = np.clip(img_np, 0, 255)
                 images.append(Image.fromarray(img_np, mode="RGB"))
 
+            # -- Backbone timing --
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_bb_start = time.perf_counter()
+
             # 2. 提取 2 模型 tokens
             tokens_torch = self.feature_extractors.extract_batch_tokens(
                 images, max_tokens=self.max_tokens, return_torch=True
@@ -341,6 +382,10 @@ class Film2ModelOnline:
                 t.float().unsqueeze(0).to(self.device)  # [1, To, K_i, C_i]
                 for t in tokens_torch
             ]
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_bb_end = time.perf_counter()
 
             # 3. 准备 agent_pos
             agent_pos_tensor = None
@@ -356,11 +401,36 @@ class Film2ModelOnline:
             except Exception as e:
                 print(f"[WARNING] Failed to prepare agent_pos: {e}")
 
+            # -- Policy (encoder + DDPM) timing --
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_pol_start = time.perf_counter()
+
             # 4. 推理
             with torch.no_grad():
                 action_pred = self.policy.predict_action(
                     tokens_list, agent_pos=agent_pos_tensor
                 )  # [1, horizon, 14]
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_pol_end = time.perf_counter()
+
+            bb_ms = (t_bb_end - t_bb_start) * 1000
+            pol_ms = (t_pol_end - t_pol_start) * 1000
+            total_ms = bb_ms + pol_ms
+            self._timing_backbone_ms.append(bb_ms)
+            self._timing_policy_ms.append(pol_ms)
+            self._timing_total_ms.append(total_ms)
+
+            self._current_episode_calls += 1
+
+            # Print every 50 calls
+            n_calls = len(self._timing_total_ms)
+            if n_calls % 50 == 0:
+                print(f"[Timing] call#{n_calls}: bb={np.mean(self._timing_backbone_ms[1:]):.1f}ms "
+                      f"pol={np.mean(self._timing_policy_ms[1:]):.1f}ms "
+                      f"total={np.mean(self._timing_total_ms[1:]):.1f}ms")
 
             action_pred = action_pred.squeeze(0).cpu().numpy()  # [horizon, 14]
             action_pred = np.clip(action_pred, -3.0, 3.0)

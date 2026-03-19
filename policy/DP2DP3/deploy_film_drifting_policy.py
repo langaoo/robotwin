@@ -6,7 +6,7 @@ DA3-FiLM + Drifting Head 部署脚本 (Innovation 2)
 架构:
   - DINOv3 + DA3 backbone (完全相同于 film_online)
   - Encoder: DA3Film2ModelEncoder (FiLM 调制)
-  - Head: DriftingActionGenerator (单步生成，1 NFE)
+  - Head: ConditionalUnet1D + Drifting loss (单步生成，1 NFE)
   - 推理: RGB -> tokens -> FiLM -> Drifting generator -> action
 
 与 deploy_film_online_policy.py 的唯一区别:
@@ -23,6 +23,7 @@ RoBoTwin 标准接口:
 import sys
 import os
 from pathlib import Path
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -129,11 +130,20 @@ class FilmDriftingOnline:
         print(f"[FilmDrifting] Loading checkpoint: {self.ckpt_path}")
         self._load_models()
 
+        self.K_ensemble    = int(usr_args.get("K_ensemble", 1))
         self.obs_buffer   = deque(maxlen=self.n_obs_steps)
         self.action_queue = deque()
+        # Inference timing accumulators
+        self._timing_backbone_ms = []
+        self._timing_policy_ms = []
+        self._timing_total_ms = []
+        self._episode_call_counts = []  # calls per episode
+        self._episode_results = []      # True/False per episode
+        self._current_episode_calls = 0
         print(
             f"[FilmDrifting] Ready: horizon={self.horizon}, "
-            f"n_obs_steps={self.n_obs_steps}  (1-step inference)"
+            f"n_obs_steps={self.n_obs_steps}, K_ensemble={self.K_ensemble}  "
+            f"(1-step inference)"
         )
 
     def _load_models(self):
@@ -168,6 +178,7 @@ class FilmDriftingOnline:
         )
 
         # 3. ★ Drifting Policy (no DDPM)
+        drifting_temp_scale = float(drifting_cfg.get("temp_scale", 0.1))
         self.policy = DA3FilmDriftingPolicy(
             fusion_encoder=fusion_encoder,
             proprio_dim=14,
@@ -175,15 +186,22 @@ class FilmDriftingOnline:
             horizon=self.horizon,
             n_obs_steps=self.n_obs_steps,
             n_action_steps=n_action_steps,
-            drifting_temp=float(drifting_cfg.get("temp", 0.05)),
-            hidden_dim=int(drifting_cfg.get("hidden_dim", 1024)),
+            drifting_temp_scale=drifting_temp_scale,
+            drift_normalize=bool(drifting_cfg.get("drift_normalize", False)),
+            drift_norm_mode=drifting_cfg.get("drift_norm_mode", "per_obs"),
+            drift_norm_eps=float(drifting_cfg.get("drift_norm_eps", 1e-6)),
+            drift_norm_ema_decay=float(drifting_cfg.get("drift_norm_ema_decay", 0.99)),
+            drift_target_rms=float(drifting_cfg.get("drift_target_rms", 1.0)),
+            drift_use_scale=bool(drifting_cfg.get("drift_use_scale", True)),
         )
 
         # 4. 加载权重
-        state = ckpt.get("policy", {})
+        state = ckpt.get("ema_policy") if "ema_policy" in ckpt else ckpt.get("policy", {})
+        state_name = "ema_policy" if "ema_policy" in ckpt else "policy"
         if any(k.startswith("module.") for k in state.keys()):
             state = {k.replace("module.", ""): v for k, v in state.items()}
         missing, unexpected = self.policy.load_state_dict(state, strict=False)
+        print(f"[FilmDrifting] Loaded weights from: {state_name}")
         if missing:
             print(f"[WARNING] Missing keys: {missing}")
         if unexpected:
@@ -203,8 +221,45 @@ class FilmDriftingOnline:
         print("[FilmDrifting] All models loaded!")
 
     def reset(self):
+        # Save per-episode call count before clearing
+        if self._current_episode_calls > 0:
+            self._episode_call_counts.append(self._current_episode_calls)
+        self._current_episode_calls = 0
         self.obs_buffer.clear()
         self.action_queue.clear()
+
+    def mark_episode_result(self, success):
+        """Called externally to record episode outcome."""
+        self._episode_results.append(success)
+
+    def get_timing_summary(self):
+        """Return inference timing summary string for _result.txt."""
+        # Flush last episode
+        if self._current_episode_calls > 0:
+            self._episode_call_counts.append(self._current_episode_calls)
+            self._current_episode_calls = 0
+
+        if not self._timing_total_ms:
+            return ""
+        n = len(self._timing_total_ms)
+        # Skip first call (warmup/JIT)
+        skip = min(1, n - 1)
+        bb = self._timing_backbone_ms[skip:]
+        pol = self._timing_policy_ms[skip:]
+        tot = self._timing_total_ms[skip:]
+        if not tot:
+            return ""
+        lines = [
+            f"\n--- Inference Timing ({len(tot)} calls, excl. {skip} warmup) ---",
+            f"Per-call backbone (DINOv3+DA3):  mean={np.mean(bb):.1f}ms  std={np.std(bb):.1f}ms",
+            f"Per-call policy (Encoder+UNet):   mean={np.mean(pol):.1f}ms  std={np.std(pol):.1f}ms",
+            f"Per-call total:                   mean={np.mean(tot):.1f}ms  std={np.std(tot):.1f}ms",
+            f"Action Head: Drifting (1 NFE, single forward pass)",
+        ]
+        if self._episode_call_counts:
+            lines.append(f"Avg calls per episode: {np.mean(self._episode_call_counts):.1f}")
+            lines.append(f"Avg episode total time: {np.mean(self._episode_call_counts) * np.mean(tot):.0f}ms")
+        return "\n".join(lines)
 
     def update_obs(self, obs):
         self.obs_buffer.append(obs)
@@ -226,6 +281,11 @@ class FilmDriftingOnline:
                 img_np = np.clip(img_np, 0, 255)
                 images.append(Image.fromarray(img_np, mode="RGB"))
 
+            # -- Backbone timing --
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_bb_start = time.perf_counter()
+
             tokens_torch = self.feature_extractors.extract_batch_tokens(
                 images, max_tokens=self.max_tokens, return_torch=True
             )
@@ -233,6 +293,10 @@ class FilmDriftingOnline:
                 t.float().unsqueeze(0).to(self.device)
                 for t in tokens_torch
             ]
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_bb_end = time.perf_counter()
 
             agent_pos_tensor = None
             try:
@@ -247,10 +311,35 @@ class FilmDriftingOnline:
             except Exception as e:
                 print(f"[WARNING] agent_pos error: {e}")
 
+            # -- Policy (encoder + UNet) timing --
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_pol_start = time.perf_counter()
+
             with torch.no_grad():
                 action_pred = self.policy.predict_action(
-                    tokens_list, agent_pos=agent_pos_tensor
+                    tokens_list, agent_pos=agent_pos_tensor,
+                    K_ensemble=self.K_ensemble,
                 )  # [1, horizon, 14]
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_pol_end = time.perf_counter()
+
+            bb_ms = (t_bb_end - t_bb_start) * 1000
+            pol_ms = (t_pol_end - t_pol_start) * 1000
+            total_ms = bb_ms + pol_ms
+            self._timing_backbone_ms.append(bb_ms)
+            self._timing_policy_ms.append(pol_ms)
+            self._timing_total_ms.append(total_ms)
+
+            # Print every 50 calls
+            n_calls = len(self._timing_total_ms)
+            if n_calls % 50 == 0:
+                print(f"[Timing] call#{n_calls}: bb={np.mean(self._timing_backbone_ms[1:]):.1f}ms "
+                      f"pol={np.mean(self._timing_policy_ms[1:]):.1f}ms "
+                      f"total={np.mean(self._timing_total_ms[1:]):.1f}ms")
+            self._current_episode_calls += 1
 
             action_pred = action_pred.squeeze(0).cpu().numpy()
             action_pred = np.clip(action_pred, -3.0, 3.0)

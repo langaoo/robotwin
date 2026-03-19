@@ -108,7 +108,7 @@ training:
   seed: 42
   debug: False
   resume: False
-  resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/data/dump_bin_bigbin-demo_clean-50_h-0" # null
+  # resume_from: "/home/gl/RoboTwin/policy/DP/checkpoints/data/dump_bin_bigbin-demo_clean-50_h-0" # null
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500

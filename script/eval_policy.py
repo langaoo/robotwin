@@ -261,6 +261,11 @@ def main(usr_args):
         file.write(f"Expert Episodes: {usr_args.get('expert_data_num', 'N/A')}\n\n")
         # success rate(s)
         file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
+        # Inference timing (if model supports it)
+        if hasattr(model, 'get_timing_summary') and callable(model.get_timing_summary):
+            timing = model.get_timing_summary()
+            if timing:
+                file.write("\n" + timing)
 
     print(f"Data has been saved to {file_path}")
     # return task_reward

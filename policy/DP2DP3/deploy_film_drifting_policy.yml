@@ -30,3 +30,6 @@ model:
     n_obs_steps: 3
     action_dim: 14
     inference_steps: 1   # ★ Drifting: single forward pass
+
+# 推理 K-ensemble: 生成 K 个候选动作取 median (默认 1 = 单次推理)
+K_ensemble: 1

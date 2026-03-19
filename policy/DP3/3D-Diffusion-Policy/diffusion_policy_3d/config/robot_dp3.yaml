@@ -21,7 +21,7 @@ pretrain:
   # 1. "frozen": 完全冻结 ULIP encoder,只训练动作头
   # 2. "finetune": 微调模式,可以设置 warmup 和学习率比例
   # 3. "scratch": 从头训练(不加载预训练权重)
-  training_mode: "scratch"  # 可选: "frozen", "finetune", "scratch"
+  training_mode: "frozen"  # 可选: "frozen", "finetune", "scratch"
   
   # 预训练模型路径
   pretrained_pointnet_path: "/home/gl/RoboTwin/policy/DP3/3D-Diffusion-Policy/diffusion_policy_3d/pretrained_model/ULIP-2-PointBERT-8k-xyz-pc-slip_vit_b-objaverse-pretrained.pt"
@@ -74,8 +74,8 @@ policy:
   obs_as_global_cond: true
   shape_meta: ${shape_meta}
 
-  use_pc_color: true
-  pointnet_type: "pointnet"  # 可选: "ulip_xyz", "ulip_rgbxyz", pointnet
+  use_pc_color: false
+  pointnet_type: "ulip_xyz"  # 可选: "ulip_xyz", "ulip_rgbxyz", pointnet
 
   # 将 pretrain 配置传递给 policy
   training_mode: ${pretrain.training_mode}
