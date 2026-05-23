@@ -8,6 +8,7 @@ import toppra as ta
 from mplib.sapien_utils import SapienPlanner, SapienPlanningWorld
 import transforms3d as t3d
 import envs._GLOBAL_CONFIGS as CONFIGS
+from pathlib import Path
 
 
 try:
@@ -26,6 +27,25 @@ try:
     import yaml
     from curobo.util import logger
     logger.setup_logger(level="error", logger_name="curobo")
+
+    def _remap_legacy_robotwin_path(value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.replace('\\', '/')
+        if normalized.startswith('/home/gl/RoboTwin'):
+            suffix = normalized[len('/home/gl/RoboTwin'):].lstrip('/')
+            return str(Path(CONFIGS.ROOT_PATH) / suffix)
+        if normalized.startswith('/data/gl/RoboTwin'):
+            suffix = normalized[len('/data/gl/RoboTwin'):].lstrip('/')
+            return str(Path(CONFIGS.ROOT_PATH) / suffix)
+        return value
+
+    def _remap_paths_in_yaml(obj):
+        if isinstance(obj, dict):
+            return {k: _remap_paths_in_yaml(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_remap_paths_in_yaml(v) for v in obj]
+        return _remap_legacy_robotwin_path(obj)
 
     class CuroboPlanner:
 
@@ -51,6 +71,22 @@ try:
             # translate from baselink to arm's base
             with open(self.yml_path, "r") as f:
                 yml_data = yaml.safe_load(f)
+            yml_data = _remap_paths_in_yaml(yml_data)
+
+            robot_cfg = yml_data.get("robot_cfg", {})
+            kin_cfg = robot_cfg.get("kinematics", {})
+            for k in ("urdf_path", "collision_spheres", "asset_root_path"):
+                if k in kin_cfg:
+                    kin_cfg[k] = _remap_legacy_robotwin_path(kin_cfg[k])
+
+            # 覆盖写回临时 yml，确保 curobo 内部加载到的是修正后的路径
+            import tempfile
+            tmp_yml = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+            yaml.safe_dump(yml_data, tmp_yml)
+            tmp_yml.flush()
+            tmp_yml.close()
+            self.yml_path = tmp_yml.name
+
             self.frame_bias = yml_data["planner"]["frame_bias"]
 
             # motion generation

@@ -10,6 +10,7 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import os
+import math
 import hydra
 import torch
 from omegaconf import OmegaConf
@@ -184,13 +185,15 @@ class RobotWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
 
+        gradient_accumulate_every = max(1, int(cfg.training.gradient_accumulate_every))
+        steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulate_every)
+
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(len(train_dataloader) * cfg.training.num_epochs) //
-            cfg.training.gradient_accumulate_every,
+            num_training_steps=steps_per_epoch * cfg.training.num_epochs,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
             last_epoch=self.global_step - 1,
@@ -268,6 +271,7 @@ class RobotWorkspace(BaseWorkspace):
         prev_grad_norm = None
 
         with JsonLogger(log_path) as json_logger:
+            self.optimizer.zero_grad()
             while self.epoch < cfg.training.num_epochs:
                 step_log = dict()
                 # ========= train for this epoch ==========
@@ -332,7 +336,7 @@ class RobotWorkspace(BaseWorkspace):
                             train_sampling_batch = batch
                         # compute loss
                         raw_loss = self.model.compute_loss(batch)
-                        loss = raw_loss / cfg.training.gradient_accumulate_every
+                        loss = raw_loss / gradient_accumulate_every
                         loss.backward()
 
                         # compute gradient norm after backward for logging
@@ -344,14 +348,25 @@ class RobotWorkspace(BaseWorkspace):
                         if prev_grad_norm is not None and grad_norm is not None:
                             grad_delta = grad_norm - prev_grad_norm
 
+                        is_last_batch = batch_idx == (len(train_dataloader) - 1)
+                        hit_max_train_steps = (
+                            cfg.training.max_train_steps is not None
+                            and batch_idx >= (cfg.training.max_train_steps - 1)
+                        )
+                        should_step = (
+                            ((batch_idx + 1) % gradient_accumulate_every == 0)
+                            or is_last_batch
+                            or hit_max_train_steps
+                        )
+
                         # step optimizer
-                        if (self.global_step % cfg.training.gradient_accumulate_every == 0):
+                        if should_step:
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
 
-                        # update ema
-                        if cfg.training.use_ema:
+                        # update ema on optimizer steps only
+                        if cfg.training.use_ema and should_step:
                             ema.step(self.model)
 
                         # logging
@@ -377,14 +392,13 @@ class RobotWorkspace(BaseWorkspace):
                             step_log["grad_norm_delta"] = grad_delta
                         prev_grad_norm = grad_norm if grad_norm is not None else prev_grad_norm
 
-                        is_last_batch = batch_idx == (len(train_dataloader) - 1)
-                        if not is_last_batch:
+                        if not is_last_batch and not hit_max_train_steps:
                             # log of last step is combined with validation and rollout
                             json_logger.log(step_log)
-                            self.global_step += 1
+                            if should_step:
+                                self.global_step += 1
 
-                        if (cfg.training.max_train_steps
-                                is not None) and batch_idx >= (cfg.training.max_train_steps - 1):
+                        if hit_max_train_steps:
                             break
 
                 # at the end of each epoch
@@ -459,7 +473,8 @@ class RobotWorkspace(BaseWorkspace):
                 # end of epoch
                 # log of last step is combined with validation and rollout
                 json_logger.log(step_log)
-                self.global_step += 1
+                if should_step:
+                    self.global_step += 1
                 self.epoch += 1
 
 

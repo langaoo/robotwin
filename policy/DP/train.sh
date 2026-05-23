@@ -13,6 +13,7 @@ epoch_num=${8:-600}  # 训练轮数
 isfinetune=${9:-False}  # 是否微调
 basemodel=${10:-}  # 微调模型路径
 resume_from=${11:-}  # 继续训练的模型路径
+gradient_accumulate_every=${12:-${GRADIENT_ACCUMULATE_EVERY:-1}}  # 梯度累积次数；默认不开启
 
 
 head_camera_type=D435
@@ -28,6 +29,7 @@ run_dir="data/outputs/${exp_name}_seed${seed}"
 
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 echo -e "\033[36m(batch size override -> ${batch_size})\033[0m"
+echo -e "\033[36m(gradient accumulation -> ${gradient_accumulate_every}, effective batch -> $((batch_size * gradient_accumulate_every)))\033[0m"
 
 
 if [ $DEBUG = True ]; then
@@ -43,6 +45,12 @@ fi
 
 export HYDRA_FULL_ERROR=1 
 export CUDA_VISIBLE_DEVICES=${gpu_id}
+CONDA_SITE_PACKAGES="$(python - <<'PY'
+import site
+print(site.getsitepackages()[0])
+PY
+)"
+export PYTHONPATH="${CONDA_SITE_PACKAGES}:${PYTHONPATH}"
 
 if [ ! -d "./data/${task_name}-${task_config}-${expert_data_num}_multi_cam.zarr" ]; then
     bash process_data.sh ${task_name} ${task_config} ${expert_data_num}
@@ -63,6 +71,7 @@ python train.py --config-name=${config_name}.yaml \
                             head_camera_type=$head_camera_type \
                             dataloader.batch_size=${batch_size} \
                             val_dataloader.batch_size=${batch_size} \
+                            training.gradient_accumulate_every=${gradient_accumulate_every} \
                             finetune.isfinetune=${isfinetune} \
                             training.num_epochs=${epoch_num} \
                             finetune.resume_from=${resume_from} \

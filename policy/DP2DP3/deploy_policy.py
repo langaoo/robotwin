@@ -35,6 +35,8 @@ policy_dir = os.path.dirname(current_file_path)
 features_model_dir = os.path.join(policy_dir, "features_model")
 sys.path.insert(0, features_model_dir)
 
+from path_config import DP_ROOT, ROBOTWIN_ROOT, FEATURES_MODEL_ROOT
+
 from features_common.alignment.rgb2pc_aligned_encoder_4models import RGB2PCAlignedEncoder4Models
 from features_common.multi_gpu_extractors import MultiGPUFeatureExtractors
 from PIL import Image
@@ -43,7 +45,7 @@ from PIL import Image
 HAS_OFFICIAL_DP = False
 try:
     # 添加正版DP外层路径（DP/diffusion_policy包含diffusion_policy子目录）
-    DP_OUTER = Path(features_model_dir) / "DP" / "diffusion_policy"
+    DP_OUTER = DP_ROOT
     if DP_OUTER.exists() and (DP_OUTER / "diffusion_policy").exists():
         sys.path.insert(0, str(DP_OUTER))
         from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
@@ -55,6 +57,21 @@ try:
         print(f"[WARNING] 正版DP路径不存在: {DP_OUTER}")
 except ImportError as e:
     print(f"[WARNING] 正版DP导入失败: {e}")
+
+
+def _remap_legacy_robotwin_path(path_value: str | None) -> str | None:
+    if not isinstance(path_value, str):
+        return path_value
+    normalized = path_value.replace('\\', '/')
+    prefixes = (
+        '/home/gl/RoboTwin',
+        '/data/gl/RoboTwin',
+    )
+    for prefix in prefixes:
+        if normalized.startswith(prefix):
+            suffix = normalized[len(prefix):].lstrip('/')
+            return str(Path(ROBOTWIN_ROOT) / suffix)
+    return path_value
 
 
 class DPRGBPolicy(nn.Module):
@@ -1038,9 +1055,12 @@ class DP2DP3Model:
         # 并没有保存 encoder！所以我们需要重新利用 config 中的路径加载 encoder。
         
         encoder_ckpt_path = config.get('encoder', {}).get('checkpoint')
+        encoder_ckpt_path = _remap_legacy_robotwin_path(encoder_ckpt_path)
         if not encoder_ckpt_path:
             # Fallback for offline checkpoints that missed this config
-            encoder_ckpt_path = "/home/gl/RoboTwin/policy/DP2DP3/features_model/outputs/train_rgb2pc_runs/run_best_bs32/ckpt_step_0010000.pt"
+            encoder_ckpt_path = str(
+                FEATURES_MODEL_ROOT / "outputs" / "train_rgb2pc_runs" / "run_best_bs32" / "ckpt_step_0010000.pt"
+            )
             print(f"[DP2DP3] Warning: 'encoder.checkpoint' missing in config. Using default: {encoder_ckpt_path}")
 
 

@@ -1,56 +1,55 @@
-"""DP2DP3 deploy_film_drifting_policy.py
+"""
+DP2DP3 exact-old V18 drifting family deploy.
 
-DA3-FiLM + Drifting Head 部署脚本 (Innovation 2)
-=================================================
-
-架构:
-  - DINOv3 + DA3 backbone (完全相同于 film_online)
-  - Encoder: DA3Film2ModelEncoder (FiLM 调制)
-  - Head: ConditionalUnet1D + Drifting loss (单步生成，1 NFE)
-  - 推理: RGB -> tokens -> FiLM -> Drifting generator -> action
-
-与 deploy_film_online_policy.py 的唯一区别:
-  - Policy 类为 DA3FilmDriftingPolicy（无 DDPM，无迭代去噪）
-  - 推理时只需 1 次前向传播
-  - 环境变量: DP2DP3_FILM_DRIFTING_CKPT_DIR
-
-RoBoTwin 标准接口:
-  get_model(usr_args) -> FilmDriftingOnline
-  eval(TASK_ENV, model, observation)
-  reset_model(model)
+支持:
+  - exact-old V18
+  - V18 multi-temp
+  - V18 BC-adaptive
 """
 
-import sys
+from __future__ import annotations
+
 import os
-from pathlib import Path
+import sys
 import time
-import random
-import torch
-import torch.nn as nn
-import numpy as np
 from collections import deque
+from pathlib import Path
 from typing import Tuple
 
-current_file_path  = os.path.abspath(__file__)
-policy_dir         = os.path.dirname(current_file_path)
+import numpy as np
+import torch
+from PIL import Image
+
+current_file_path = os.path.abspath(__file__)
+policy_dir = os.path.dirname(current_file_path)
 features_model_dir = os.path.join(policy_dir, "features_model")
 sys.path.insert(0, features_model_dir)
 
-from PIL import Image
-
-# DP 路径（normalizer）：features_model/DP/diffusion_policy/ 是 git repo 根目录
-# 其内部的 diffusion_policy/ 才是 Python package，需要添加 repo 根目录到 sys.path
 DP_OUTER = Path(features_model_dir) / "third_party" / "DP" / "diffusion_policy"
 if DP_OUTER.exists():
     sys.path.insert(0, str(DP_OUTER))
 
+# DP2DP3/__init__.py 会先把主线 features_model 导入进来。
+# 为了强制 family deploy 使用 oldv18_repro 里的模块，这里清掉已缓存的 features_common 包。
+for module_name in list(sys.modules):
+    if module_name == "features_common" or module_name.startswith("features_common."):
+        del sys.modules[module_name]
+
 from features_common.depth_guided_film_online.extractors_2model import TwoModelExtractors
 from features_common.depth_guided_film_online.encoder_film_2model import DA3Film2ModelEncoder
 from features_common.depth_guided_film_drifting.policy_drifting import DA3FilmDriftingPolicy
-from features_common.depth_guided_film_drifting.policy_drifting_v18_multitemp_paper import DA3FilmDriftingPolicyV18MultiTempPaper
-from features_common.depth_guided_film_drifting.policy_drifting_v18_multitemp import DA3FilmDriftingPolicyV18MultiTemp
-from features_common.depth_guided_film_drifting.policy_drifting_v18_bcadapt import DA3FilmDriftingPolicyV18BCAdapt
-from features_common.depth_guided_film_drifting.policy_drifting_v18_mtbcadapt import DA3FilmDriftingPolicyV18MTBCAdapt
+from features_common.depth_guided_film_drifting.policy_drifting_v18_multitemp import (
+    DA3FilmDriftingPolicyV18MultiTemp,
+)
+from features_common.depth_guided_film_drifting.policy_drifting_v18_bcadapt import (
+    DA3FilmDriftingPolicyV18BCAdapt,
+)
+from features_common.depth_guided_film_drifting.policy_drifting_v18_multitemp_paper import (
+    DA3FilmDriftingPolicyV18MultiTempPaper,
+)
+from features_common.depth_guided_film_drifting.policy_drifting_v18_mtbcadapt import (
+    DA3FilmDriftingPolicyV18MTBCAdapt,
+)
 
 
 def encode_obs(observation):
@@ -73,17 +72,72 @@ def encode_obs(observation):
     return obs
 
 
-def _as_bool(x):
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, (int, float)):
-        return bool(int(x))
-    s = str(x).strip().lower()
-    if s in ("1", "true", "yes", "y", "on"):
-        return True
-    if s in ("0", "false", "no", "n", "off", "none", "null"):
-        return False
-    return bool(x)
+def _build_policy(fusion_encoder, ckpt, config):
+    enc_cfg = ckpt.get("encoder_cfg", config.get("encoder", {}))
+    drifting_cfg = ckpt.get("drifting_cfg", config.get("drifting", {}))
+    policy_class_name = ckpt.get("policy_class", "DA3FilmDriftingPolicy")
+
+    common_kwargs = dict(
+        fusion_encoder=fusion_encoder,
+        proprio_dim=14,
+        action_dim=14,
+        horizon=int(config.get("data", {}).get("horizon", 8)),
+        n_obs_steps=int(config.get("data", {}).get("n_obs_steps", 3)),
+        n_action_steps=int(config.get("data", {}).get("n_action_steps", 6)),
+        drifting_temp_scale=float(drifting_cfg.get("temp_scale", 1.0)),
+    )
+
+    if policy_class_name == "DA3FilmDriftingPolicyV18MTBCAdapt" or (
+        drifting_cfg.get("temp_scales") and float(drifting_cfg.get("bc_lambda", 0.0)) > 0.0
+    ):
+        policy = DA3FilmDriftingPolicyV18MTBCAdapt(
+            drifting_temp_scales=drifting_cfg.get("temp_scales", None),
+            drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", True)),
+            drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
+            bc_lambda=float(drifting_cfg.get("bc_lambda", 0.10)),
+            bc_prefix_steps=drifting_cfg.get("bc_prefix_steps", None),
+            bc_gate_center=float(drifting_cfg.get("bc_gate_center", 1.0)),
+            bc_gate_sharpness=float(drifting_cfg.get("bc_gate_sharpness", 0.25)),
+            **common_kwargs,
+        )
+    elif policy_class_name == "DA3FilmDriftingPolicyV18MultiTempPaper" or drifting_cfg.get("temp_norm_mode") == "paper_global":
+        policy = DA3FilmDriftingPolicyV18MultiTempPaper(
+            drifting_temp_scales=drifting_cfg.get("temp_scales", None),
+            drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", False)),
+            drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
+            **common_kwargs,
+        )
+    elif policy_class_name == "DA3FilmDriftingPolicyV18MultiTemp" or drifting_cfg.get("temp_scales"):
+        policy = DA3FilmDriftingPolicyV18MultiTemp(
+            drifting_temp_scales=drifting_cfg.get("temp_scales", None),
+            drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", True)),
+            drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
+            **common_kwargs,
+        )
+    elif policy_class_name == "DA3FilmDriftingPolicyV18BCAdapt" or float(drifting_cfg.get("bc_lambda", 0.0)) > 0.0:
+        policy = DA3FilmDriftingPolicyV18BCAdapt(
+            bc_lambda=float(drifting_cfg.get("bc_lambda", 0.10)),
+            bc_prefix_steps=drifting_cfg.get("bc_prefix_steps", None),
+            bc_gate_center=float(drifting_cfg.get("bc_gate_center", 1.0)),
+            bc_gate_sharpness=float(drifting_cfg.get("bc_gate_sharpness", 0.25)),
+            **common_kwargs,
+        )
+    else:
+        policy = DA3FilmDriftingPolicy(**common_kwargs)
+
+    policy.drift_scale = float(drifting_cfg.get("drift_scale", 1.0))
+    return policy, enc_cfg, drifting_cfg
+
+
+@torch.no_grad()
+def _predict_action_ensemble(policy, tokens_list, agent_pos, K_ensemble: int):
+    K = max(1, int(K_ensemble))
+    if K == 1:
+        return policy.predict_action(tokens_list, agent_pos=agent_pos)
+    preds = []
+    for _ in range(K):
+        preds.append(policy.predict_action(tokens_list, agent_pos=agent_pos))
+    return torch.stack(preds, dim=1).median(dim=1).values
 
 
 def _factor_grid(k: int) -> Tuple[int, int]:
@@ -108,6 +162,7 @@ def _normalize_map(x: np.ndarray) -> np.ndarray:
 
 
 def _jet_colormap01(x: np.ndarray) -> np.ndarray:
+    """x: [H,W] in [0,1] -> [H,W,3] uint8"""
     x = np.clip(x, 0.0, 1.0)
     r = np.clip(1.5 - np.abs(4.0 * x - 3.0), 0.0, 1.0)
     g = np.clip(1.5 - np.abs(4.0 * x - 2.0), 0.0, 1.0)
@@ -117,11 +172,13 @@ def _jet_colormap01(x: np.ndarray) -> np.ndarray:
 
 
 def _token_to_maps(token_kc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """token_kc: [K,C] -> (norm_map[H,W], pca1_map[H,W])"""
     k, c = token_kc.shape
     h, w = _factor_grid(k)
     token_kc = token_kc[: h * w, :]
 
     norm_map = np.linalg.norm(token_kc, axis=1).reshape(h, w)
+
     x = token_kc - np.mean(token_kc, axis=0, keepdims=True)
     if c > 1:
         cov = (x.T @ x) / max(1, x.shape[0] - 1)
@@ -162,44 +219,31 @@ def _heat_stats(heat01: np.ndarray) -> dict:
     }
 
 
-class FilmDriftingOnline:
-    """DA3-FiLM + Drifting Head 在线部署包装器."""
-
+class FilmDriftingV18FamilyOnline:
     def __init__(self, usr_args):
-        self.usr_args    = usr_args
-        self.gpu_id      = 0
-        self.device      = torch.device(
-            f"cuda:{self.gpu_id}" if torch.cuda.is_available() else "cpu"
-        )
+        self.usr_args = usr_args
+        self.gpu_id = 0
+        self.device = torch.device(f"cuda:{self.gpu_id}" if torch.cuda.is_available() else "cpu")
         self.replan_every_call = True
-        self.n_action_exec     = int(usr_args.get("n_action_exec", 6))
-        self.task_name         = usr_args["task_name"]
-        self.ckpt_setting      = usr_args.get("ckpt_setting", "demo_clean")
-        self.expert_data_num   = usr_args.get("expert_data_num", 50)
-        self.seed              = usr_args.get("seed", 0)
-        self.checkpoint_num    = usr_args.get("checkpoint_num", "best")
-        self.policy_deterministic_infer = _as_bool(
-            usr_args.get("policy_deterministic_infer", False)
-        )
-        policy_eval_seed = usr_args.get("policy_eval_seed", None)
-        self.policy_eval_seed = int(policy_eval_seed) if policy_eval_seed is not None else None
-        self._policy_rng = None
-        self._episode_id = -1
+        self.n_action_exec = int(usr_args.get("n_action_exec", 6))
+        self.task_name = usr_args["task_name"]
+        self.ckpt_setting = usr_args.get("ckpt_setting", "demo_clean-v18_exactold")
+        self.expert_data_num = usr_args.get("expert_data_num", 50)
+        self.seed = usr_args.get("seed", 0)
+        self.checkpoint_num = usr_args.get("checkpoint_num", "best")
 
-        # ---- Checkpoint dir 搜索 ----
-        env_ckpt_dir = os.environ.get("DP2DP3_FILM_DRIFTING_CKPT_DIR", "")
+        env_ckpt_dir = (
+            os.environ.get("DP2DP3_FILM_DRIFTING_V18_CKPT_DIR", "")
+            or os.environ.get("DP2DP3_FILM_DRIFTING_CKPT_DIR", "")
+        )
         if env_ckpt_dir and Path(env_ckpt_dir).is_dir():
             ckpt_dir = Path(env_ckpt_dir)
-            print(f"[FilmDrifting] Using env ckpt dir: {ckpt_dir}")
+            print(f"[FilmDriftingV18] Using env ckpt dir: {ckpt_dir}")
         else:
             ckpt_dir_name = (
-                f"{self.task_name}-{self.ckpt_setting}-"
-                f"{self.expert_data_num}-{self.seed}"
+                f"{self.task_name}-{self.ckpt_setting}-{self.expert_data_num}-{self.seed}"
             )
-            ckpt_roots = [
-                Path(policy_dir) / "checkpoints_film_drifting",
-                Path(features_model_dir) / "checkpoints_film_drifting",
-            ]
+            ckpt_roots = [Path(policy_dir) / "checkpoints_film_drifting"]
             ckpt_dir = None
             for root in ckpt_roots:
                 d = root / ckpt_dir_name
@@ -208,38 +252,36 @@ class FilmDriftingOnline:
                     break
             if ckpt_dir is None:
                 raise FileNotFoundError(
-                    f"[FilmDrifting] Checkpoint dir not found. Searched:\n"
+                    "[FilmDriftingV18] Checkpoint dir not found. Searched:\n"
                     + "\n".join(f"  {r / ckpt_dir_name}" for r in ckpt_roots)
                 )
 
-        # ---- 具体 ckpt 文件 ----
-        if str(self.checkpoint_num).lower() == "best":
+        ckpt_selector = str(self.checkpoint_num).lower()
+        if ckpt_selector == "best":
             best = ckpt_dir / "best.ckpt"
             if best.exists():
                 self.ckpt_path = best
             else:
                 files = [f for f in ckpt_dir.glob("*.ckpt") if f.stem.isdigit()]
                 if not files:
-                    raise FileNotFoundError(f"[FilmDrifting] No .ckpt in {ckpt_dir}")
+                    raise FileNotFoundError(f"[FilmDriftingV18] No .ckpt in {ckpt_dir}")
                 self.ckpt_path = max(files, key=lambda f: int(f.stem))
         else:
             self.ckpt_path = ckpt_dir / f"{int(self.checkpoint_num)}.ckpt"
             if not self.ckpt_path.exists():
-                raise FileNotFoundError(
-                    f"[FilmDrifting] Checkpoint not found: {self.ckpt_path}"
-                )
+                raise FileNotFoundError(f"[FilmDriftingV18] Checkpoint not found: {self.ckpt_path}")
 
-        print(f"[FilmDrifting] Loading checkpoint: {self.ckpt_path}")
+        print(f"[FilmDriftingV18] Loading checkpoint: {self.ckpt_path}")
         self._load_models()
 
-        self.obs_buffer   = deque(maxlen=self.n_obs_steps)
+        self.K_ensemble = int(usr_args.get("K_ensemble", 1))
+        self.obs_buffer = deque(maxlen=self.n_obs_steps)
         self.action_queue = deque()
-        # Inference timing accumulators
         self._timing_backbone_ms = []
         self._timing_policy_ms = []
         self._timing_total_ms = []
-        self._episode_call_counts = []  # calls per episode
-        self._episode_results = []      # True/False per episode
+        self._episode_call_counts = []
+        self._episode_results = []
         self._current_episode_calls = 0
 
         self.vis_dump_dir = usr_args.get("vis_dump_dir", None)
@@ -248,56 +290,25 @@ class FilmDriftingOnline:
         self._vis_dump_calls = 0
         if self.vis_dump_dir:
             Path(self.vis_dump_dir).mkdir(parents=True, exist_ok=True)
-            print(f"[FilmDrifting] Visual dump enabled: {self.vis_dump_dir}")
-
-        if self.policy_deterministic_infer and self.policy_eval_seed is not None:
-            rng_device = "cuda" if self.device.type == "cuda" else "cpu"
-            self._policy_rng = torch.Generator(device=rng_device)
-            self._reset_policy_rng_for_episode()
-            print(
-                f"[FilmDrifting] Deterministic policy inference enabled: base_seed={self.policy_eval_seed}"
-            )
-        elif self.policy_deterministic_infer:
-            print(
-                "[FilmDrifting] policy_deterministic_infer=True but policy_eval_seed is missing; fallback to stochastic inference"
-            )
+            print(f"[FilmDriftingV18] Visual dump enabled: {self.vis_dump_dir}")
 
         print(
-            f"[FilmDrifting] Ready: horizon={self.horizon}, "
-            f"n_obs_steps={self.n_obs_steps}  (1-step inference)"
+            f"[FilmDriftingV18] Ready: horizon={self.horizon}, "
+            f"n_obs_steps={self.n_obs_steps}, K_ensemble={self.K_ensemble}"
         )
 
-    def _reset_policy_rng_for_episode(self):
-        if self._policy_rng is None or self.policy_eval_seed is None:
-            return
-        episode_seed = int(self.policy_eval_seed + max(self._episode_id, 0))
-        self._policy_rng.manual_seed(episode_seed)
-        random.seed(episode_seed)
-        np.random.seed(episode_seed)
-        torch.manual_seed(episode_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(episode_seed)
-
     def _load_models(self):
-        ckpt   = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(self.ckpt_path, map_location="cpu", weights_only=False)
         config = ckpt.get("config", {})
+        self.horizon = config.get("data", {}).get("horizon", 8)
+        self.n_obs_steps = config.get("data", {}).get("n_obs_steps", 3)
+        self.action_dim = 14
+        n_action_steps = config.get("data", {}).get("n_action_steps", 6)
 
-        self.horizon      = config.get("data", {}).get("horizon", 8)
-        self.n_obs_steps  = config.get("data", {}).get("n_obs_steps", 3)
-        self.action_dim   = 14
-        n_action_steps    = config.get("data", {}).get("n_action_steps", 6)
-
-        enc_cfg         = ckpt.get("encoder_cfg", config.get("encoder", {}))
-        drifting_cfg    = ckpt.get("drifting_cfg", config.get("drifting", {}))
+        enc_cfg = ckpt.get("encoder_cfg", config.get("encoder", {}))
         self.max_tokens = int(enc_cfg.get("max_tokens", 196))
 
-        print(f"[FilmDrifting] Encoder config: {enc_cfg}")
-        print(f"[FilmDrifting] Drifting config: {drifting_cfg}")
-
-        # 1. Backbones
         self.feature_extractors = TwoModelExtractors(gpu_id=self.gpu_id)
-
-        # 2. Encoder
         fusion_encoder = DA3Film2ModelEncoder(
             semantic_in_dim=int(enc_cfg.get("semantic_in_dim", 768)),
             geometric_in_dim=int(enc_cfg.get("geometric_in_dim", 2048)),
@@ -309,62 +320,10 @@ class FilmDriftingOnline:
             max_tokens=self.max_tokens,
         )
 
-        # 3. ★ Drifting Policy (no DDPM)
-        drifting_temp_scale = float(drifting_cfg.get("temp_scale", 1.0))
-        policy_class_name = ckpt.get("policy_class", "DA3FilmDriftingPolicy")
-        print(f"[FilmDrifting] Policy class: {policy_class_name}")
+        self.policy, _, drifting_cfg = _build_policy(fusion_encoder, ckpt, config)
+        print(f"[FilmDriftingV18] Encoder config: {enc_cfg}")
+        print(f"[FilmDriftingV18] Drifting config: {drifting_cfg}")
 
-        common_kwargs = dict(
-            fusion_encoder=fusion_encoder,
-            proprio_dim=14,
-            action_dim=self.action_dim,
-            horizon=self.horizon,
-            n_obs_steps=self.n_obs_steps,
-            n_action_steps=n_action_steps,
-            drifting_temp_scale=drifting_temp_scale,
-        )
-
-        if policy_class_name == "DA3FilmDriftingPolicyV18MTBCAdapt" or (
-            drifting_cfg.get("temp_scales") and float(drifting_cfg.get("bc_lambda", 0.0)) > 0.0
-        ):
-            self.policy = DA3FilmDriftingPolicyV18MTBCAdapt(
-                drifting_temp_scales=drifting_cfg.get("temp_scales", None),
-                drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", True)),
-                drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
-                bc_lambda=float(drifting_cfg.get("bc_lambda", 0.10)),
-                bc_prefix_steps=drifting_cfg.get("bc_prefix_steps", None),
-                bc_gate_center=float(drifting_cfg.get("bc_gate_center", 1.0)),
-                bc_gate_sharpness=float(drifting_cfg.get("bc_gate_sharpness", 0.25)),
-                **common_kwargs,
-            )
-        elif policy_class_name == "DA3FilmDriftingPolicyV18MultiTempPaper" or drifting_cfg.get("temp_norm_mode") == "paper_global":
-            self.policy = DA3FilmDriftingPolicyV18MultiTempPaper(
-                drifting_temp_scales=drifting_cfg.get("temp_scales", None),
-                drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", False)),
-                drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
-                **common_kwargs,
-            )
-        elif policy_class_name == "DA3FilmDriftingPolicyV18MultiTemp" or drifting_cfg.get("temp_scales"):
-            self.policy = DA3FilmDriftingPolicyV18MultiTemp(
-                drifting_temp_scales=drifting_cfg.get("temp_scales", None),
-                drifting_temp_norm_each=bool(drifting_cfg.get("temp_norm_each", True)),
-                drifting_temp_norm_eps=float(drifting_cfg.get("temp_norm_eps", 1e-6)),
-                **common_kwargs,
-            )
-        elif policy_class_name == "DA3FilmDriftingPolicyV18BCAdapt" or float(drifting_cfg.get("bc_lambda", 0.0)) > 0.0:
-            self.policy = DA3FilmDriftingPolicyV18BCAdapt(
-                bc_lambda=float(drifting_cfg.get("bc_lambda", 0.10)),
-                bc_prefix_steps=drifting_cfg.get("bc_prefix_steps", None),
-                bc_gate_center=float(drifting_cfg.get("bc_gate_center", 1.0)),
-                bc_gate_sharpness=float(drifting_cfg.get("bc_gate_sharpness", 0.25)),
-                **common_kwargs,
-            )
-        else:
-            self.policy = DA3FilmDriftingPolicy(**common_kwargs)
-
-        self.policy.drift_scale = float(drifting_cfg.get("drift_scale", 1.0))
-
-        # 4. 加载权重
         state = ckpt.get("policy", {})
         if any(k.startswith("module.") for k in state.keys()):
             state = {k.replace("module.", ""): v for k, v in state.items()}
@@ -374,44 +333,33 @@ class FilmDriftingOnline:
         if unexpected:
             print(f"[WARNING] Unexpected keys: {unexpected}")
 
-        # 5. Normalizer
         if "normalizer" in ckpt:
             self.policy.normalizer.load_state_dict(ckpt["normalizer"])
-        else:
-            print("[WARNING] Normalizer not found!")
         try:
             self.policy.normalizer.to(self.device)
         except Exception:
             pass
 
         self.policy = self.policy.to(self.device).eval()
-        print("[FilmDrifting] All models loaded!")
+        print("[FilmDriftingV18] All models loaded!")
 
     def reset(self):
-        # Save per-episode call count before clearing
         if self._current_episode_calls > 0:
             self._episode_call_counts.append(self._current_episode_calls)
         self._current_episode_calls = 0
-        self._episode_id += 1
-        self._reset_policy_rng_for_episode()
         self.obs_buffer.clear()
         self.action_queue.clear()
 
     def mark_episode_result(self, success):
-        """Called externally to record episode outcome."""
         self._episode_results.append(success)
 
     def get_timing_summary(self):
-        """Return inference timing summary string for _result.txt."""
-        # Flush last episode
         if self._current_episode_calls > 0:
             self._episode_call_counts.append(self._current_episode_calls)
             self._current_episode_calls = 0
-
         if not self._timing_total_ms:
             return ""
         n = len(self._timing_total_ms)
-        # Skip first call (warmup/JIT)
         skip = min(1, n - 1)
         bb = self._timing_backbone_ms[skip:]
         pol = self._timing_policy_ms[skip:]
@@ -423,14 +371,8 @@ class FilmDriftingOnline:
             f"Per-call backbone (DINOv3+DA3):  mean={np.mean(bb):.1f}ms  std={np.std(bb):.1f}ms",
             f"Per-call policy (Encoder+UNet):   mean={np.mean(pol):.1f}ms  std={np.std(pol):.1f}ms",
             f"Per-call total:                   mean={np.mean(tot):.1f}ms  std={np.std(tot):.1f}ms",
-            f"Action Head: Drifting (1 NFE, single forward pass)",
+            "Action Head: V18 Drifting Family (1 NFE)",
         ]
-        lines.append(
-            f"Policy infer deterministic: {self.policy_deterministic_infer}, policy_eval_seed={self.policy_eval_seed}"
-        )
-        if self._episode_call_counts:
-            lines.append(f"Avg calls per episode: {np.mean(self._episode_call_counts):.1f}")
-            lines.append(f"Avg episode total time: {np.mean(self._episode_call_counts) * np.mean(tot):.0f}ms")
         return "\n".join(lines)
 
     def update_obs(self, obs):
@@ -453,7 +395,6 @@ class FilmDriftingOnline:
                 img_np = np.clip(img_np, 0, 255)
                 images.append(Image.fromarray(img_np, mode="RGB"))
 
-            # -- Backbone timing --
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_bb_start = time.perf_counter()
@@ -461,6 +402,7 @@ class FilmDriftingOnline:
             tokens_torch = self.feature_extractors.extract_batch_tokens(
                 images, max_tokens=self.max_tokens, return_torch=True
             )
+            tokens_list = [t.float().unsqueeze(0).to(self.device) for t in tokens_torch]
 
             if self.vis_dump_dir and (
                 self.vis_dump_max_calls <= 0 or self._vis_dump_calls < self.vis_dump_max_calls
@@ -469,12 +411,7 @@ class FilmDriftingOnline:
                     self._dump_visual_maps(images, tokens_torch)
                     self._vis_dump_calls += 1
                 except Exception as e:
-                    print(f"[FilmDrifting][WARN] visual dump failed: {e}")
-
-            tokens_list = [
-                t.float().unsqueeze(0).to(self.device)
-                for t in tokens_torch
-            ]
+                    print(f"[FilmDriftingV18][WARN] visual dump failed: {e}")
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -487,23 +424,21 @@ class FilmDriftingOnline:
                     for o in self.obs_buffer
                 ]
                 ap_seq = np.stack(ap_list, axis=0)
-                agent_pos_tensor = (
-                    torch.from_numpy(ap_seq).float().to(self.device).unsqueeze(0)
-                )
+                agent_pos_tensor = torch.from_numpy(ap_seq).float().to(self.device).unsqueeze(0)
             except Exception as e:
                 print(f"[WARNING] agent_pos error: {e}")
 
-            # -- Policy (encoder + UNet) timing --
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_pol_start = time.perf_counter()
 
             with torch.no_grad():
-                action_pred = self.policy.predict_action(
+                action_pred = _predict_action_ensemble(
+                    self.policy,
                     tokens_list,
-                    agent_pos=agent_pos_tensor,
-                    noise_generator=self._policy_rng,
-                )  # [1, horizon, 14]
+                    agent_pos_tensor,
+                    self.K_ensemble,
+                )
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -515,18 +450,10 @@ class FilmDriftingOnline:
             self._timing_backbone_ms.append(bb_ms)
             self._timing_policy_ms.append(pol_ms)
             self._timing_total_ms.append(total_ms)
-
-            # Print every 50 calls
-            n_calls = len(self._timing_total_ms)
-            if n_calls % 50 == 0:
-                print(f"[Timing] call#{n_calls}: bb={np.mean(self._timing_backbone_ms[1:]):.1f}ms "
-                      f"pol={np.mean(self._timing_policy_ms[1:]):.1f}ms "
-                      f"total={np.mean(self._timing_total_ms[1:]):.1f}ms")
             self._current_episode_calls += 1
 
             action_pred = action_pred.squeeze(0).cpu().numpy()
             action_pred = np.clip(action_pred, -3.0, 3.0)
-
             self.action_queue.clear()
             self.action_queue.extend(action_pred)
 
@@ -545,7 +472,9 @@ class FilmDriftingOnline:
                 )
 
         for m_idx, t_bkc in enumerate(tokens_torch):
-            if not isinstance(t_bkc, torch.Tensor) or t_bkc.ndim != 3:
+            if not isinstance(t_bkc, torch.Tensor):
+                continue
+            if t_bkc.ndim != 3:
                 continue
             b, _, _ = t_bkc.shape
             mname = model_names[m_idx] if m_idx < len(model_names) else f"model{m_idx}"
@@ -573,12 +502,8 @@ class FilmDriftingOnline:
                     )
 
 
-# ============================================================
-# RoBoTwin 标准接口
-# ============================================================
-
 def get_model(usr_args):
-    return FilmDriftingOnline(usr_args)
+    return FilmDriftingV18FamilyOnline(usr_args)
 
 
 def eval(TASK_ENV, model, observation):

@@ -1,6 +1,13 @@
 import sys
 import os
 import subprocess
+import pickle
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 \(.+\) or chardet \(.+\)/charset_normalizer \(.+\) doesn't match a supported version!",
+)
 
 sys.path.append("./")
 sys.path.append(f"./policy")
@@ -108,6 +115,10 @@ def main(usr_args):
             print(f"\033[36m[INFO] Override eval_video_log -> {args['eval_video_log']}\033[0m")
         except Exception:
             pass
+
+    if "dump_obs_dir" in usr_args:
+        args["dump_obs_dir"] = usr_args.get("dump_obs_dir")
+        print(f"\033[36m[INFO] Override dump_obs_dir -> {args['dump_obs_dir']}\033[0m")
 
     args['task_name'] = task_name
     args["task_config"] = task_config
@@ -303,6 +314,10 @@ def eval_policy(task_name,
     task_total_reward = 0
     clear_cache_freq = args["clear_cache_freq"]
 
+    dump_obs_dir = args.get("dump_obs_dir", None)
+    if dump_obs_dir:
+        Path(dump_obs_dir).mkdir(parents=True, exist_ok=True)
+
     args["eval_mode"] = True
     
     print(f"\033[93m[DEBUG] Starting eval loop with st_seed={st_seed}, test_num={test_num}\033[0m")
@@ -391,8 +406,18 @@ def eval_policy(task_name,
 
         succ = False
         reset_func(model)
+        obs_dumped = False
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
+            if dump_obs_dir and not obs_dumped:
+                dump_path = Path(dump_obs_dir) / f"episode{TASK_ENV.test_num}_seed{now_seed}_step0_obs.pkl"
+                try:
+                    with open(dump_path, "wb") as f:
+                        pickle.dump(observation, f)
+                    print(f"\033[36m[INFO] dumped first observation to: {dump_path}\033[0m")
+                    obs_dumped = True
+                except Exception as e:
+                    print(f"\033[33m[WARN] failed to dump first observation: {e}\033[0m")
             eval_func(TASK_ENV, model, observation)
             if TASK_ENV.eval_success:
                 succ = True
